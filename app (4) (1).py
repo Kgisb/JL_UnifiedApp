@@ -2805,18 +2805,20 @@ elif view == "Lead Movement":
         horizontal=True,
         key="lm_refpick"
     )
-    ref_col = None
-    if ref_choice == "Lead Activity Date":
-        ref_col = lead_activity_col
+    ref_col = lead_activity_col if ref_choice == "Lead Activity Date" else last_connected_col
+
+    # Coerce ref datetime and compute days since safely (avoid .dt on .date)
+    if ref_col:
+        d["_ref_dt"] = coerce_datetime(d[ref_col])
+        # Use pd.Timestamp(today) for vectorized timedelta, keep NaT safe
+        d["_days_since"] = (pd.Timestamp(today) - d["_ref_dt"]).dt.days
     else:
-        ref_col = last_connected_col
+        d["_ref_dt"] = pd.NaT
+        d["_days_since"] = np.nan
 
-    d["_ref_dt"] = coerce_datetime(d[ref_col]) if ref_col else pd.Series(pd.NaT, index=d.index)
-    d["_ref_date"] = d["_ref_dt"].dt.date
-    d["_days_since"] = (today - d["_ref_dt"].dt.date).dt.days if ref_col else pd.Series(pd.NA, index=d.index)
-
-    # Only meaningful (non-negative) day gaps; ignore NaT or future dates
-    valid_days = d["_days_since"].apply(lambda x: isinstance(x, (int, np.integer)) and x >= 0)
+    # Keep only valid non-negative day gaps
+    s = d["_days_since"]
+    valid_days = pd.to_numeric(s, errors="coerce").notna() & (s >= 0)
     d_valid = d.loc[valid_days].copy()
 
     # ==== UI for inactivity threshold & bucket view ====
@@ -2883,7 +2885,7 @@ elif view == "Lead Movement":
             cat = pd.cut(s, bins=[-1] + edges[1:], labels=labels)
             return cat.value_counts().reindex(labels, fill_value=0).rename_axis("Bucket").reset_index(name="Count")
         else:
-            # Monthly-like 30-day spans: 0–29,30–59,60–89,...
+            # Monthly-ish 30-day spans: 0–29,30–59,60–89,...
             mx = int(s.max())
             edges = list(range(0, mx + 30, 30))
             labels = [f"{a}–{b-1}" for a, b in zip(edges[:-1], edges[1:])]
