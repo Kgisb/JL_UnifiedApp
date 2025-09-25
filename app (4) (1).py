@@ -166,7 +166,7 @@ with st.sidebar:
     st.header("JetLearn • Navigation")
     view = st.radio(
         "Go to",
-        ["Dashboard", "MIS", "Predictibility", "Trend & Analysis", "80-20", "Stuck deals", "Daily business", "Lead Movement],  # ← add this
+        ["Dashboard", "MIS", "Predictibility", "Trend & Analysis", "80-20", "Stuck deals", "Daily business", "Lead Movement"],  # ← add this
         index=0
     )
     track = st.radio("Track", ["Both", "AI Coding", "Math"], index=0)
