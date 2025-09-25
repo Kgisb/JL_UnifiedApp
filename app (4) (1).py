@@ -2424,51 +2424,144 @@ elif view == "Dashboard":
         kpi_block("This Month (MTD)", PERIODS[3][1], PERIODS[3][2])
 
     # ---- Predictability (this month) box ----
+        # ---- Predictability (this month) box ----
     st.markdown("<div class='section-title'>Predictability — This Month</div>", unsafe_allow_html=True)
 
-    # Re-use existing monthly forecast (A + B + C) by source
+    # Helper: dynamic targets based on Academic Counsellor global filter
+    def get_dynamic_targets(sel_counsellors_list):
+        # If specific counsellor(s) selected (i.e., not "All") → small targets (AI=20, Math=8)
+        # Else → full-month org targets (AI=150, Math=50)
+        try:
+            if sel_counsellors_list and ("All" not in sel_counsellors_list):
+                ai_tgt, math_tgt = 20, 8
+            else:
+                ai_tgt, math_tgt = 150, 50
+        except Exception:
+            # Fallback if the selection list isn't available for any reason
+            ai_tgt, math_tgt = 150, 50
+        return {"AI Coding": ai_tgt, "Math": math_tgt, "Total": ai_tgt + math_tgt}
+
+    # Pull targets from current global selection
+    dynamic_targets = get_dynamic_targets(sel_counsellors)
+    target_total = float(dynamic_targets["Total"])
+    target_ai    = float(dynamic_targets["AI Coding"])
+    target_math  = float(dynamic_targets["Math"])
+
+    # Re-use existing monthly forecast (A + B + C) by source (overall)
     lookback = 3
     weighted = True
     tbl_pred, totals_pred = predict_running_month(df_f, create_col, pay_col, source_col, lookback, weighted, today=date.today())
 
-    # A, B, C and Projected
+    # Overall A, B, C and Projected (same as before)
     A = float(totals_pred.get("A_Actual_ToDate", 0.0))
     B = float(totals_pred.get("B_Remaining_SameMonth", 0.0))
     C = float(totals_pred.get("C_Remaining_PrevMonths", 0.0))
     projected = float(totals_pred.get("Projected_MonthEnd_Total", A + B + C))
 
+    # Time math for day-based averages
     cur_start, cur_end = month_bounds(date.today())
     elapsed_days = (date.today() - cur_start).days + 1
-    total_days = (cur_end - cur_start).days + 1
+    total_days   = (cur_end - cur_start).days + 1
     remaining_days = max(0, total_days - elapsed_days)
 
-    avg_actual_per_day = A / elapsed_days if elapsed_days > 0 else 0.0
+    avg_actual_per_day    = A / elapsed_days if elapsed_days > 0 else 0.0
     avg_projected_per_day = projected / total_days if total_days > 0 else 0.0
 
-    target_total = 150.0
-    gap = max(0.0, target_total - A)
-    req_avg_per_day = (gap / remaining_days) if remaining_days > 0 else (0.0 if gap <= 0 else float("inf"))
+    # ===== Per-pipeline actuals (A) for AI vs Math, this month-to-date =====
+    # We'll compute current-month payments split by normalized pipeline to show required/day by pipeline.
+    d_m = add_month_cols(df_f, create_col, pay_col)
+    cur_period = pd.Period(date.today(), freq="M")
+    cur_paid = d_m[d_m["_pay_m"] == cur_period].copy()
 
+    if pipeline_col and (pipeline_col in cur_paid.columns):
+        pl_series = cur_paid[pipeline_col].map(normalize_pipeline).fillna("Other")
+    else:
+        pl_series = pd.Series(["Other"] * len(cur_paid), index=cur_paid.index)
+
+    A_ai   = float((pl_series == "AI Coding").sum())
+    A_math = float((pl_series == "Math").sum())
+
+    # ===== Required averages to hit dynamic targets =====
+    # Overall
+    gap_total = max(0.0, target_total - A)
+    req_avg_total_per_day = (gap_total / remaining_days) if remaining_days > 0 else (0.0 if gap_total <= 0 else float("inf"))
+
+    # By pipeline
+    gap_ai   = max(0.0, target_ai - A_ai)
+    gap_math = max(0.0, target_math - A_math)
+    req_ai_per_day   = (gap_ai / remaining_days) if remaining_days > 0 else (0.0 if gap_ai <= 0 else float("inf"))
+    req_math_per_day = (gap_math / remaining_days) if remaining_days > 0 else (0.0 if gap_math <= 0 else float("inf"))
+
+    # ===== Render KPIs =====
     p1, p2, p3, p4 = st.columns(4)
     with p1:
-        st.markdown(f"<div class='kpi-card'><div class='kpi-title'>A · Actual to date</div><div class='kpi-value'>{A:.1f}</div><div class='kpi-sub'>{cur_start} → {date.today()}</div></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='kpi-card'><div class='kpi-title'>A · Actual to date</div>"
+            f"<div class='kpi-value'>{A:.1f}</div>"
+            f"<div class='kpi-sub'>{cur_start} → {date.today()}</div></div>", unsafe_allow_html=True)
     with p2:
-        st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Projected Month-End (A+B+C)</div><div class='kpi-value'>{projected:.1f}</div><div class='kpi-sub'>Remaining days: {remaining_days}</div></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='kpi-card'><div class='kpi-title'>Projected Month-End (A+B+C)</div>"
+            f"<div class='kpi-value'>{projected:.1f}</div>"
+            f"<div class='kpi-sub'>Remaining days: {remaining_days}</div></div>", unsafe_allow_html=True)
     with p3:
-        st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Avg enrolments/day</div><div class='kpi-value'>{avg_actual_per_day:.2f}</div><div class='kpi-sub'>Actual so far</div></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='kpi-card'><div class='kpi-title'>Avg enrolments/day</div>"
+            f"<div class='kpi-value'>{avg_actual_per_day:.2f}</div>"
+            f"<div class='kpi-sub'>Actual so far</div></div>", unsafe_allow_html=True)
     with p4:
-        st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Projected avg/day</div><div class='kpi-value'>{avg_projected_per_day:.2f}</div><div class='kpi-sub'>For the full month</div></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='kpi-card'><div class='kpi-title'>Projected avg/day</div>"
+            f"<div class='kpi-value'>{avg_projected_per_day:.2f}</div>"
+            f"<div class='kpi-sub'>For the full month</div></div>", unsafe_allow_html=True)
 
+    # Overall target vs required/day
     t1, t2 = st.columns(2)
     with t1:
-        st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Target</div><div class='kpi-value'>150</div><div class='kpi-sub'>Total enrolments</div></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='kpi-card'><div class='kpi-title'>Target (dynamic)</div>"
+            f"<div class='kpi-value'>{int(target_total)}</div>"
+            f"<div class='kpi-sub'>AI {int(target_ai)} + Math {int(target_math)}</div></div>", unsafe_allow_html=True)
     with t2:
-        if np.isfinite(req_avg_per_day):
-            st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Required avg/day to hit 150</div><div class='kpi-value'>{req_avg_per_day:.2f}</div><div class='kpi-sub'>Given current A and remaining {remaining_days} days</div></div>", unsafe_allow_html=True)
+        if np.isfinite(req_avg_total_per_day):
+            st.markdown(
+                f"<div class='kpi-card'><div class='kpi-title'>Required avg/day to hit target</div>"
+                f"<div class='kpi-value'>{req_avg_total_per_day:.2f}</div>"
+                f"<div class='kpi-sub'>Given current A and remaining {remaining_days} days</div></div>", unsafe_allow_html=True)
         else:
-            st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Required avg/day to hit 150</div><div class='kpi-value'>–</div><div class='kpi-sub'>Target already met or no days left</div></div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='kpi-card'><div class='kpi-title'>Required avg/day to hit target</div>"
+                f"<div class='kpi-value'>–</div>"
+                f"<div class='kpi-sub'>Target met or no days left</div></div>", unsafe_allow_html=True)
 
-    # Small stacked bar of A/B/C (visual)
+    # Pipeline split: show current A and required/day vs dynamic per-pipeline targets
+    q1, q2 = st.columns(2)
+    with q1:
+        # AI Coding panel
+        if np.isfinite(req_ai_per_day):
+            req_ai_txt = f"{req_ai_per_day:.2f}"
+        else:
+            req_ai_txt = "–"
+        st.markdown(
+            f"<div class='kpi-card'>"
+            f"<div class='kpi-title'>AI Coding — Target {int(target_ai)}</div>"
+            f"<div class='kpi-value'>{int(A_ai)}</div>"
+            f"<div class='kpi-sub'>A (MTD payments) • Required/day: <b>{req_ai_txt}</b></div>"
+            f"</div>", unsafe_allow_html=True)
+    with q2:
+        # Math panel
+        if np.isfinite(req_math_per_day):
+            req_math_txt = f"{req_math_per_day:.2f}"
+        else:
+            req_math_txt = "–"
+        st.markdown(
+            f"<div class='kpi-card'>"
+            f"<div class='kpi-title'>Math — Target {int(target_math)}</div>"
+            f"<div class='kpi-value'>{int(A_math)}</div>"
+            f"<div class='kpi-sub'>A (MTD payments) • Required/day: <b>{req_math_txt}</b></div>"
+            f"</div>", unsafe_allow_html=True)
+
+    # Small stacked bar of A/B/C (visual) — unchanged
     if not tbl_pred.empty:
         melt = tbl_pred.melt(
             id_vars=["Source"],
