@@ -2761,7 +2761,7 @@ elif view == "Lead Movement":
     # ---- Deal Stage filter (optional)
     if dealstage_col and dealstage_col in df_f.columns:
         ds_vals = ["All"] + sorted(df_f[dealstage_col].dropna().astype(str).unique().tolist())
-        sel_ds = st.multiselect("Filter: Deal Stage", options=ds_vals, default=["All"])
+        sel_ds = st.multiselect("Filter: Deal Stage", options=ds_vals, default=["All"], key="lm_stage_pick")
     else:
         sel_ds = ["All"]
         st.info("Deal Stage column not found — stage filter disabled.")
@@ -2810,7 +2810,6 @@ elif view == "Lead Movement":
 
     # ---- Compute 'days since' safely (stay datetime64[ns], no .dt.date chaining)
     d["_ref_dt"] = coerce_datetime(d[ref_col])
-    # valid, non-negative
     d["_days_since"] = (pd.Timestamp(today) - d["_ref_dt"]).dt.days
     valid_mask = pd.to_numeric(d["_days_since"], errors="coerce").notna() & (d["_days_since"] >= 0)
     d = d.loc[valid_mask].copy()
@@ -2937,6 +2936,85 @@ elif view == "Lead Movement":
         )
 
     # =========================
+    # NEW: Country-wise stacked distribution (+ Top 5 countries)
+    # =========================
+    st.markdown("### Inactivity distribution by Country (stacked)")
+
+    if not country_col or country_col not in d_focus.columns:
+        st.info("Country column not found — cannot build country-wise distribution.")
+    else:
+        d_cty = d_focus.copy()
+        d_cty["_Country"] = d_cty[country_col].fillna("Unknown").astype(str)
+
+        # Compute totals by country to determine Top 5
+        totals_cty = (
+            d_cty.groupby("_Country", observed=True).size()
+                 .rename("Total").reset_index()
+                 .sort_values("Total", ascending=False)
+        )
+        top5 = totals_cty["_Country"].head(5).tolist()
+
+        show_all_countries = st.checkbox("Show ALL countries (otherwise show Top 5)", value=False, key="lm_country_show_all")
+        if show_all_countries:
+            keep_countries = totals_cty["_Country"].tolist()
+            title_suffix = "All Countries"
+        else:
+            keep_countries = top5
+            title_suffix = "Top 5 Countries"
+
+        d_cty = d_cty[d_cty["_Country"].isin(keep_countries)].copy()
+
+        agg_cty = (
+            d_cty.groupby(["Bucket", "_Country"], observed=True)
+                 .size().rename("Count").reset_index()
+        )
+
+        if pd.api.types.is_categorical_dtype(agg_cty["Bucket"]):
+            bucket_order = [str(x) for x in agg_cty["Bucket"].cat.categories]
+        else:
+            bucket_order = sorted(agg_cty["Bucket"].astype(str).unique().tolist())
+        agg_cty["Bucket"] = agg_cty["Bucket"].astype(str)
+
+        cty_stacked = alt.Chart(agg_cty).mark_bar().encode(
+            x=alt.X("Bucket:N", sort=bucket_order, title="Inactivity bucket (days)"),
+            y=alt.Y("Count:Q", title="Leads"),
+            color=alt.Color("_Country:N", title="Country", legend=alt.Legend(orient="bottom", labelLimit=260)),
+            order=alt.Order("_Country:N"),
+            tooltip=[
+                alt.Tooltip("Bucket:N", title="Bucket"),
+                alt.Tooltip("_Country:N", title="Country"),
+                alt.Tooltip("Count:Q", title="Count"),
+            ],
+        ).properties(height=360, title=f"Inactivity distribution by {ref_pick} — {title_suffix}")
+        st.altair_chart(cty_stacked, use_container_width=True)
+
+        st.download_button(
+            f"Download CSV — Inactivity × Country ({'All' if show_all_countries else 'Top 5'})",
+            data=agg_cty.rename(columns={"_Country":"Country"}).to_csv(index=False).encode("utf-8"),
+            file_name=f"lead_movement_inactivity_by_country_{'all' if show_all_countries else 'top5'}.csv",
+            mime="text/csv",
+            key="lm_dl_by_country"
+        )
+
+        # Additional: Top Countries bar chart (total counts in current selection)
+        st.markdown("#### Top countries (total inactive leads)")
+        top_cty_chart_data = totals_cty[totals_cty["_Country"].isin(keep_countries)].copy()
+        top_cty_chart = alt.Chart(top_cty_chart_data).mark_bar().encode(
+            x=alt.X("Total:Q", title="Leads"),
+            y=alt.Y("_Country:N", sort='-x', title="Country"),
+            tooltip=[alt.Tooltip("_Country:N", title="Country"), alt.Tooltip("Total:Q", title="Leads")],
+        ).properties(height=280, title=f"{title_suffix} — total inactive leads")
+        st.altair_chart(top_cty_chart, use_container_width=True)
+
+        st.download_button(
+            f"Download CSV — Totals by Country ({'All' if show_all_countries else 'Top 5'})",
+            data=top_cty_chart_data.rename(columns={"_Country":"Country"}).to_csv(index=False).encode("utf-8"),
+            file_name=f"lead_movement_totals_by_country_{'all' if show_all_countries else 'top5'}.csv",
+            mime="text/csv",
+            key="lm_dl_cty_totals"
+        )
+
+    # =========================
     # Detail view — Deal Stage breakdown (for current threshold)
     # =========================
     st.markdown("### Detail: Deal Stage of inactive leads (at current threshold)")
@@ -2984,6 +3062,7 @@ elif view == "Lead Movement":
         if ref_col:    show_cols.append(ref_col)
         if dealstage_col: show_cols.append(dealstage_col)
         if source_col: show_cols.append(source_col)
+        if country_col: show_cols.append(country_col)
         preview = d_focus[show_cols].copy() if show_cols else d_focus.copy()
         preview["Days since"] = d_focus["_days_since"].astype(int)
         preview["Bucket"] = d_focus["Bucket"].astype(str)
