@@ -2743,32 +2743,49 @@ elif view == "Daily business":
 # ["MIS", "Predictibility", "Trend & Analysis", "80-20", "Stuck deals", "Lead Movement"]
 
 elif view == "Lead Movement":
-    st.subheader("Lead Movement – Inactivity since last touch")
+    st.subheader("Lead Movement — Idle leads by last touch (with Deal Stage filter)")
 
-    # ---- Map the two required columns (kept local to this tab) ----
+    # ---- Column discovery
     lead_activity_col = find_col(df, [
-        "Lead Activity Date", "Last Activity Date", "Lead Last Activity Date", "Lead activity date"
+        "Lead Activity Date", "Last Activity Date", "Last Activity", "Activity Date"
     ])
     last_connected_col = find_col(df, [
-        "Last Connected", "Last connected", "Last_Connected", "Last Contacted", "Last Contacted Date"
+        "Last Connected", "Last Connected Date", "Last Contacted", "Last Contacted Date"
     ])
+
     if not lead_activity_col and not last_connected_col:
-        st.error("Could not find **Lead Activity Date** or **Last Connected** in your file.")
+        st.error("Could not find 'Lead Activity Date' or 'Last Connected' columns in the dataset.")
         st.stop()
 
-    # ---- Controls ----
-    ref_pick = st.radio(
-        "Reference date",
-        options=[opt for opt, col in [("Lead Activity Date", lead_activity_col), ("Last Connected", last_connected_col)] if col],
-        horizontal=True,
-        key="lm_ref_pick",
+    # ---- Which reference date to use for 'days since'
+    ref_choice = st.radio(
+        "Reference date for 'days since last touch'",
+        options=[opt for opt in ["Lead Activity Date", "Last Connected"] if
+                 (opt == "Lead Activity Date" and lead_activity_col) or (opt == "Last Connected" and last_connected_col)],
+        index=0, horizontal=True, key="lm_ref_choice"
     )
-    ref_col = lead_activity_col if ref_pick == "Lead Activity Date" else last_connected_col
+    ref_col = lead_activity_col if ref_choice == "Lead Activity Date" else last_connected_col
 
+    # ---- Deal Stage filter
+    if dealstage_col and dealstage_col in df_f.columns:
+        _stages_series = df_f[dealstage_col].astype(str)
+        stage_options = ["All"] + sorted(_stages_series.fillna("Unknown").unique().tolist())
+        sel_stages_lm = st.multiselect(
+            "Deal Stage (filter)",
+            options=stage_options,
+            default=["All"],
+            key="lm_stage_filter",
+            help="Filter Lead Movement by current Deal Stage."
+        )
+    else:
+        sel_stages_lm = ["All"]
+        st.info("Deal Stage column not found — stage filter not applied.")
+
+    # ---- Date scope (filters the reference date column)
     date_mode = st.radio(
-        "Date scope (applied to the chosen reference date)",
-        ["This month", "Last month", "Custom"],
-        index=0, horizontal=True, key="lm_scope"
+        "Date scope (applies to the chosen reference date)",
+        ["This month", "Last month", "Custom range"],
+        index=0, horizontal=True, key="lm_date_mode"
     )
     if date_mode == "This month":
         range_start, range_end = month_bounds(today)
@@ -2778,240 +2795,160 @@ elif view == "Lead Movement":
         st.caption(f"Scope: **Last month** ({range_start} → {range_end})")
     else:
         c1, c2 = st.columns(2)
-        with c1: range_start = st.date_input("Start date", value=today.replace(day=1), key="lm_start")
-        with c2: range_end   = st.date_input("End date",   value=month_bounds(today)[1], key="lm_end")
+        with c1:
+            range_start = st.date_input("Start date", value=today.replace(day=1), key="lm_start")
+        with c2:
+            range_end = st.date_input("End date", value=month_bounds(today)[1], key="lm_end")
         if range_end < range_start:
-            st.error("End date cannot be before start date."); st.stop()
+            st.error("End date cannot be before start date.")
+            st.stop()
         st.caption(f"Scope: **Custom** ({range_start} → {range_end})")
 
-    inactivity_days = st.slider("Inactive for at least … days", min_value=1, max_value=120, value=14, step=1, key="lm_days")
-
-    granularity = st.radio("Aggregate by", ["Day", "Week", "Month"], index=0, horizontal=True, key="lm_gran")
-
-    stack_by_source = st.checkbox(
-        "Stack by JetLearn Deal Source (else show overall line)", value=True,
-        help="When enabled and Deal Source exists, chart is stacked bars by source; otherwise a single line.",
-        key="lm_stack"
+    # ---- Idle threshold slider
+    idle_thresh = st.slider(
+        "Show leads idle for at least (days)",
+        min_value=0, max_value=120, value=7, step=1, key="lm_idle_days",
+        help="Counts leads whose chosen reference date is ≥ this many days ago from today."
     )
 
-    # ---- Prepare data (use filtered df_f, preserve global filters & Track) ----
+    # ---- Prep data
     d = df_f.copy()
+    # Apply Deal Stage filter
+    if dealstage_col and dealstage_col in d.columns and "All" not in sel_stages_lm:
+        d = d[d[dealstage_col].fillna("Unknown").astype(str).isin(sel_stages_lm)].copy()
+
+    # Compute reference datetime & days since
     d["_ref_dt"] = coerce_datetime(d[ref_col])
     d = d.loc[d["_ref_dt"].notna()].copy()
-
     d["_ref_date"] = d["_ref_dt"].dt.date
     d["_days_since"] = (pd.to_datetime(date.today()) - d["_ref_dt"]).dt.days.astype("Int64")
 
-    # Apply date range on the reference date
-    in_range = d["_ref_date"].between(range_start, range_end)
-    d = d.loc[in_range].copy()
+    # Apply date-range scope on the reference date column
+    in_scope = d["_ref_date"].between(range_start, range_end)
+    d = d.loc[in_scope].copy()
 
-    # Apply inactivity filter (>= slider)
-    d = d.loc[d["_days_since"] >= inactivity_days].copy()
+    # ---- KPI: idle count
+    idle_mask = d["_days_since"] >= idle_thresh
+    total_in_scope = int(len(d))
+    idle_count = int(idle_mask.sum())
+    pct_idle = (idle_count / total_in_scope * 100.0) if total_in_scope > 0 else 0.0
 
-    # ---- Summary KPIs ----
-    total_inactive = int(len(d))
-    # Optional: show how many had a Deal Stage and Deal Source
-    with st.container():
-        k1, k2, k3 = st.columns(3)
-        with k1:
-            st.markdown(
-                f"<div class='kpi-card'><div class='kpi-title'>Inactive ≥ {inactivity_days} days</div>"
-                f"<div class='kpi-value'>{total_inactive:,}</div>"
-                f"<div class='kpi-sub'>{range_start} → {range_end}</div></div>", unsafe_allow_html=True
-            )
-        with k2:
-            if source_col and source_col in d.columns:
-                has_src = int(d[source_col].notna().sum())
-                st.markdown(
-                    f"<div class='kpi-card'><div class='kpi-title'>With Deal Source</div>"
-                    f"<div class='kpi-value'>{has_src:,}</div>"
-                    f"<div class='kpi-sub'>of {total_inactive:,}</div></div>", unsafe_allow_html=True
-                )
-            else:
-                st.markdown("<div class='kpi-card'><div class='kpi-title'>With Deal Source</div><div class='kpi-value'>–</div></div>", unsafe_allow_html=True)
-        with k3:
-            if dealstage_col and dealstage_col in d.columns:
-                has_stage = int(d[dealstage_col].notna().sum())
-                st.markdown(
-                    f"<div class='kpi-card'><div class='kpi-title'>With Deal Stage</div>"
-                    f"<div class='kpi-value'>{has_stage:,}</div>"
-                    f"<div class='kpi-sub'>of {total_inactive:,}</div></div>", unsafe_allow_html=True
-                )
-            else:
-                st.markdown("<div class='kpi-card'><div class='kpi-title'>With Deal Stage</div><div class='kpi-value'>–</div></div>", unsafe_allow_html=True)
-
-    # ---- Build time buckets ----
-    if granularity == "Day":
-        d["_bucket"] = d["_ref_date"]
-        x_title = "Date"
-    elif granularity == "Week":
-        # Week starts Monday; take start-of-week date
-        tmp = pd.to_datetime(d["_ref_date"])
-        d["_bucket"] = (tmp.dt.to_period("W-MON").apply(lambda p: p.start_time.date()))
-        x_title = "Week (start)"
-    else:  # Month
-        tmp = pd.to_datetime(d["_ref_date"])
-        d["_bucket"] = (tmp.dt.to_period("M").apply(lambda p: date(p.year, p.month, 1)))
-        x_title = "Month"
-
-    # ---- Chart: stacked bars by source OR single line overall ----
-    if total_inactive == 0:
-        st.info("No leads match the current inactivity and date filters.")
-    else:
-        if stack_by_source and source_col and source_col in d.columns:
-            dfc = d.copy()
-            dfc["_src"] = dfc[source_col].fillna("Unknown").astype(str)
-            agg = dfc.groupby(["_bucket", "_src"]).size().rename("Count").reset_index()
-            chart = (
-                alt.Chart(agg).mark_bar()
-                .encode(
-                    x=alt.X("_bucket:T", title=x_title),
-                    y=alt.Y("Count:Q", title="Inactive leads"),
-                    color=alt.Color("_src:N", title="Deal Source", legend=alt.Legend(orient="bottom", labelLimit=240)),
-                    tooltip=[alt.Tooltip("_bucket:T", title=x_title),
-                             alt.Tooltip("_src:N", title="Deal Source"),
-                             alt.Tooltip("Count:Q")]
-                )
-                .properties(height=360, title=f"Inactive ≥ {inactivity_days} days • {ref_pick}")
-            )
-            st.altair_chart(chart, use_container_width=True)
-        else:
-            agg = d.groupby("_bucket").size().rename("Count").reset_index()
-            chart = (
-                alt.Chart(agg).mark_line(point=True)
-                .encode(
-                    x=alt.X("_bucket:T", title=x_title),
-                    y=alt.Y("Count:Q", title="Inactive leads"),
-                    tooltip=[alt.Tooltip("_bucket:T", title=x_title), alt.Tooltip("Count:Q")]
-                )
-                .properties(height=360, title=f"Inactive ≥ {inactivity_days} days • {ref_pick}")
-            )
-            st.altair_chart(chart, use_container_width=True)
-
-    # ---- Detail / Deal Stage breakdown ----
-    st.markdown("### Detail: Deal Stage breakdown (for current inactivity filter)")
-    tabs = st.tabs(["Breakdown", "Table"])
-
-    # Build stage table only if we have a stage column
-    if dealstage_col and dealstage_col in d.columns and total_inactive > 0:
-        stage_tbl = (
-            d.assign(_stage=d[dealstage_col].fillna("Unknown").astype(str))
-             .groupby("_stage").size().rename("Count").reset_index()
-             .sort_values("Count", ascending=False)
-        )
-    else:
-        stage_tbl = pd.DataFrame(columns=["_stage", "Count"])
-
-    with tabs[0]:
-        if stage_tbl.empty:
-            st.info("No Deal Stage data available for the current selection.")
-        else:
-            chart = (
-                alt.Chart(stage_tbl).mark_bar()
-                .encode(
-                    x=alt.X("_stage:N", title="Deal Stage", sort=stage_tbl["_stage"].tolist()),
-                    y=alt.Y("Count:Q", title="Count"),
-                    tooltip=[alt.Tooltip("_stage:N", title="Deal Stage"), alt.Tooltip("Count:Q")],
-                    color=alt.Color("_stage:N", legend=None),
-                )
-                .properties(height=360, title="Inactive leads by Deal Stage")
-            )
-            st.altair_chart(chart, use_container_width=True)
-
-    with tabs[1]:
-        if total_inactive == 0:
-            st.info("No rows to show.")
-        else:
-            # Preview a useful subset
-            show_cols = []
-            for c in [ref_col, dealstage_col, source_col, country_col, counsellor_col]:
-                if c and c in d.columns: show_cols.append(c)
-            show_cols = list(dict.fromkeys(show_cols))  # de-dupe
-            preview = d[show_cols].copy() if show_cols else d.copy()
-            st.dataframe(preview.head(1000), use_container_width=True)
-
-            # Download
-            csv = preview.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "Download CSV – Lead Movement detail",
-                data=csv,
-                file_name="lead_movement_detail.csv",
-                mime="text/csv",
-                key="lm_dl_detail",
-            )
-
-    # ---- SECOND PART: Created vs Enrolments for the same date window ----
-    st.markdown("### Created vs Enrolments in the selected window")
-    # Deals created within the SAME window (independent of inactivity filter)
-    dd = df_f.copy()
-    dd["_cdate"] = coerce_datetime(dd[create_col]).dt.date if create_col else pd.NaT
-    dd["_pdate"] = coerce_datetime(dd[pay_col]).dt.date if pay_col else pd.NaT
-
-    deals_created = int(dd["_cdate"].between(range_start, range_end).sum()) if create_col else 0
-    payments_in_win = dd.loc[dd["_pdate"].between(range_start, range_end)].copy() if pay_col else pd.DataFrame()
-
-    # Toggle: MTD-level vs Cohort-level counting for payments
-    pay_mode = st.radio(
-        "Payments counting mode", ["MTD-level (ref-only)", "Cohort-level (created within window)"],
-        index=0, horizontal=True, key="lm_paymode",
-        help="MTD-level: count all payments with Payment Received in the window.\n"
-             "Cohort-level: count only payments whose deals were Created within the window."
-    )
-    if not payments_in_win.empty and create_col:
-        if pay_mode.startswith("Cohort"):
-            payments_in_win = payments_in_win.loc[payments_in_win["_cdate"].between(range_start, range_end)].copy()
-
-    enrolments = int(len(payments_in_win)) if not payments_in_win.empty else 0
-    conv_pct = (enrolments / deals_created * 100.0) if deals_created > 0 else 0.0
-
-    kA, kB, kC = st.columns(3)
-    with kA:
+    k1, k2, k3 = st.columns(3)
+    with k1:
         st.markdown(
-            f"<div class='kpi-card'><div class='kpi-title'>Deals Created</div>"
-            f"<div class='kpi-value'>{deals_created:,}</div>"
+            f"<div class='kpi-card'><div class='kpi-title'>Leads in scope</div>"
+            f"<div class='kpi-value'>{total_in_scope:,}</div>"
             f"<div class='kpi-sub'>{range_start} → {range_end}</div></div>", unsafe_allow_html=True
         )
-    with kB:
+    with k2:
         st.markdown(
-            f"<div class='kpi-card'><div class='kpi-title'>Enrolments (Payments)</div>"
-            f"<div class='kpi-value'>{enrolments:,}</div>"
-            f"<div class='kpi-sub'>{pay_mode.split(' ')[0]}</div></div>", unsafe_allow_html=True
+            f"<div class='kpi-card'><div class='kpi-title'>Idle ≥ {idle_thresh} days</div>"
+            f"<div class='kpi-value' style='color:{PALETTE['AI Coding']}'>{idle_count:,}</div>"
+            f"<div class='kpi-sub'>{pct_idle:.1f}% of scope</div></div>", unsafe_allow_html=True
         )
-    with kC:
-        st.markdown(
-            f"<div class='kpi-card'><div class='kpi-title'>Conversion% (Payments / Created)</div>"
-            f"<div class='kpi-value'>{conv_pct:.1f}%</div>"
-            f"<div class='kpi-sub'>Num: {enrolments:,} • Den: {deals_created:,}</div></div>", unsafe_allow_html=True
-        )
-
-    # Small visualization of created vs payments by the chosen granularity (over the same window)
-    # Build monthly/weekly/daily series
-    if deals_created + enrolments > 0:
-        def _bucket_series(series_dates: pd.Series, label: str) -> pd.DataFrame:
-            s = pd.to_datetime(series_dates.dropna())
-            if granularity == "Day":
-                b = s.dt.date
-            elif granularity == "Week":
-                b = s.dt.to_period("W-MON").apply(lambda p: p.start_time.date())
-            else:
-                b = s.dt.to_period("M").apply(lambda p: date(p.year, p.month, 1))
-            return pd.DataFrame({"Bucket": b}).assign(Metric=label).value_counts(["Bucket", "Metric"]).rename("Count").reset_index()
-
-        created_ts = _bucket_series(dd.loc[dd["_cdate"].between(range_start, range_end), "_cdate"], "Deals Created") if create_col else pd.DataFrame(columns=["Bucket","Metric","Count"])
-        pay_ts = _bucket_series(payments_in_win["_pdate"] if not payments_in_win.empty else pd.Series([], dtype="datetime64[ns]"), "Enrolments") if pay_col else pd.DataFrame(columns=["Bucket","Metric","Count"])
-
-        ts = pd.concat([created_ts, pay_ts], ignore_index=True)
-        if not ts.empty:
-            bars = (
-                alt.Chart(ts).mark_bar()
-                .encode(
-                    x=alt.X("Bucket:T", title={"Day":"Date","Week":"Week (start)","Month":"Month"}[granularity]),
-                    y=alt.Y("Count:Q", title="Count"),
-                    color=alt.Color("Metric:N", title="", legend=alt.Legend(orient="bottom")),
-                    xOffset=alt.XOffset("Metric:N"),
-                    tooltip=[alt.Tooltip("Bucket:T"), alt.Tooltip("Metric:N"), alt.Tooltip("Count:Q")]
-                )
-                .properties(height=360, title=f"Deals vs Enrolments • {granularity}-wise")
+    with k3:
+        if dealstage_col and "All" not in sel_stages_lm:
+            st.markdown(
+                f"<div class='kpi-card'><div class='kpi-title'>Stage filter</div>"
+                f"<div class='kpi-value'>{', '.join(sel_stages_lm)}</div>"
+                f"<div class='kpi-sub'>Applied to scope</div></div>", unsafe_allow_html=True
             )
-            st.altair_chart(bars, use_container_width=True)
+        else:
+            st.markdown(
+                f"<div class='kpi-card'><div class='kpi-title'>Stage filter</div>"
+                f"<div class='kpi-value'>All</div>"
+                f"<div class='kpi-sub'>No stage restriction</div></div>", unsafe_allow_html=True
+            )
+
+    # ---- Bucket distribution (idle only)
+    buckets = [
+        (0, 3, "0–3"), (4, 7, "4–7"), (8, 14, "8–14"),
+        (15, 30, "15–30"), (31, 60, "31–60"), (61, 9999, "61+")
+    ]
+    def to_bucket(x):
+        if pd.isna(x): return None
+        for lo, hi, lab in buckets:
+            if lo <= int(x) <= hi: return lab
+        return None
+
+    d_idle = d.loc[idle_mask].copy()
+    d_idle["_bucket"] = d_idle["_days_since"].apply(to_bucket)
+    bucket_order = [b[2] for b in buckets]
+
+    st.markdown("### Idle distribution")
+    stack_by_source = st.checkbox(
+        "Stack by JetLearn Deal Source",
+        value=bool(source_col and source_col in d_idle.columns),
+        key="lm_stack_source",
+        help="If on, bars are stacked by Deal Source. If off, show a single series."
+    )
+
+    if d_idle.empty:
+        st.info("No leads meet the idle threshold within the selected scope.")
+    else:
+        if stack_by_source and source_col and source_col in d_idle.columns:
+            d_idle["_src"] = d_idle[source_col].fillna("Unknown").astype(str)
+            agg = (
+                d_idle.groupby(["_bucket", "_src"]).size()
+                .rename("Count").reset_index()
+            )
+            agg["_bucket"] = pd.Categorical(agg["_bucket"], categories=bucket_order, ordered=True)
+            chart = alt.Chart(agg).mark_bar(opacity=0.9).encode(
+                x=alt.X("_bucket:N", title="Days since last touch (bucket)", sort=bucket_order),
+                y=alt.Y("Count:Q", title="Leads (idle)"),
+                color=alt.Color("_src:N", title="Deal Source", legend=alt.Legend(orient="bottom")),
+                tooltip=[alt.Tooltip("_bucket:N", title="Bucket"),
+                         alt.Tooltip("_src:N", title="Source"),
+                         alt.Tooltip("Count:Q")]
+            ).properties(height=360, title=f"Idle leads ≥ {idle_thresh} days — by bucket (stacked by source)")
+        else:
+            agg = (
+                d_idle.groupby("_bucket").size()
+                .rename("Count").reset_index()
+            )
+            agg["_bucket"] = pd.Categorical(agg["_bucket"], categories=bucket_order, ordered=True)
+            chart = alt.Chart(agg).mark_bar(opacity=0.9).encode(
+                x=alt.X("_bucket:N", title="Days since last touch (bucket)", sort=bucket_order),
+                y=alt.Y("Count:Q", title="Leads (idle)"),
+                tooltip=[alt.Tooltip("_bucket:N", title="Bucket"),
+                         alt.Tooltip("Count:Q")]
+            ).properties(height=360, title=f"Idle leads ≥ {idle_thresh} days — by bucket")
+        st.altair_chart(chart, use_container_width=True)
+
+    # ---- Detail: Deal Stage breakdown for idle leads
+    st.markdown("### Detail — Deal Stage breakdown (idle leads)")
+    if dealstage_col and not d_idle.empty:
+        stage_tbl = (
+            d_idle.assign(_stage=d_idle[dealstage_col].fillna("Unknown").astype(str))
+                  .groupby("_stage").size().rename("Count").reset_index()
+                  .sort_values("Count", ascending=False)
+        )
+        st.dataframe(stage_tbl.rename(columns={"_stage": "Deal Stage"}), use_container_width=True)
+        st.download_button(
+            "Download CSV — Idle leads by Deal Stage",
+            data=stage_tbl.rename(columns={"_stage":"Deal Stage"}).to_csv(index=False).encode("utf-8"),
+            file_name="lead_movement_idle_by_dealstage.csv",
+            mime="text/csv",
+            key="lm_dl_stage",
+        )
+    elif not dealstage_col:
+        st.info("Deal Stage column not available for breakdown.")
+    else:
+        st.info("No idle leads to summarize by Deal Stage for the current filters.")
+
+    # ---- Optional raw table of idle leads (limited preview)
+    with st.expander("Preview idle leads (sample)"):
+        show_cols = []
+        if dealstage_col: show_cols.append(dealstage_col)
+        show_cols += [ref_col, "_days_since"]
+        if source_col: show_cols.append(source_col)
+        preview = d_idle[show_cols].sort_values("_days_since", ascending=False).head(1000)
+        preview = preview.rename(columns={ref_col: ref_choice})
+        st.dataframe(preview, use_container_width=True)
+        st.download_button(
+            "Download CSV — Idle leads (full scope)",
+            data=d_idle[show_cols].rename(columns={ref_col: ref_choice}).to_csv(index=False).encode("utf-8"),
+            file_name="lead_movement_idle_leads.csv",
+            mime="text/csv",
+            key="lm_dl_idle",
+        )
