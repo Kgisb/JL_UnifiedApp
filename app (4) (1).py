@@ -1851,7 +1851,7 @@ elif view == "Stuck deals":
         ("Calibration Done Date", cal_done_col),
         ("Payment Received Date", pay_col),
     ]:
-        if not col_var or not col_var in df_f.columns:
+        if not col_var or col_var not in df_f.columns:
             missing_cols.append(col_label)
     if missing_cols:
         st.warning(
@@ -1956,61 +1956,79 @@ elif view == "Stuck deals":
     else:
         st.info("Calibration Slot (Deal) column not found — booking type filter not applied.")
 
-    # ==== Inactivity filters (LastNotConnected / LastActivityNotDone)
-    # Try to map your column names flexibly
+    # ==== Inactivity filters (EXACT gap logic)
+    # Exact column names first, with graceful fallback
     last_activity_col = find_col(df_f, [
-        "LastActivityDate", "Last Activity Date", "LastActivityTest", "Last Activity"
+        "Last Activity Date", "LastActivityDate", "LastActivityTest", "Last Activity"
     ])
     last_connected_col = find_col(df_f, [
-        "LastConnectedDate", "Last Connected Date", "LastContacted", "Last Contacted"
+        "Last Contacted", "LastContacted", "Last Connected Date", "LastConnectedDate"
     ])
 
-    # Prepare normalized last-touch datetime columns (NaT if missing)
     d["_last_activity"]  = coerce_datetime(d[last_activity_col]) if (last_activity_col and last_activity_col in d.columns) else pd.Series(pd.NaT, index=d.index)
     d["_last_connected"] = coerce_datetime(d[last_connected_col]) if (last_connected_col and last_connected_col in d.columns) else pd.Series(pd.NaT, index=d.index)
 
+    # Compute exact day gaps (today 00:00 minus date part)
     today_ts = pd.Timestamp(date.today())
-    d["_days_since_activity"]  = (today_ts - d["_last_activity"]).dt.days
-    d["_days_since_connected"] = (today_ts - d["_last_connected"]).dt.days
+    d["_days_since_activity"]  = (today_ts - d["_last_activity"].dt.normalize()).dt.days
+    d["_days_since_connected"] = (today_ts - d["_last_connected"].dt.normalize()).dt.days
 
-    hide_payments_in_funnel = False  # default; will flip to True if any inactivity filter is used
+    # Slider ranges based on observed data (fallbacks if all NaT)
+    max_nc = int(np.nanmax(d["_days_since_connected"])) if np.isfinite(np.nanmax(d["_days_since_connected"])) else 60
+    max_na = int(np.nanmax(d["_days_since_activity"]))  if np.isfinite(np.nanmax(d["_days_since_activity"]))  else 60
+    max_nc = int(np.clip(max_nc, 0, 365))
+    max_na = int(np.clip(max_na, 0, 365))
 
-    with st.expander("Inactivity filters — LastNotConnected / LastActivityNotDone", expanded=False):
+    hide_payments_in_funnel = False  # flip to True if any inactivity filter is used
+
+    with st.expander("Inactivity filters — exact day gap", expanded=False):
         col_nc, col_na = st.columns(2)
 
         with col_nc:
-            enable_nc = st.checkbox("Enable LastNotConnected filter", value=False,
-                                    help="Keeps deals with Last Connected ≥ N days ago (or unknown).")
-            thr_nc = st.slider("Days since last connected ≥", min_value=0, max_value=180, value=15, step=1) if enable_nc else 0
+            enable_nc = st.checkbox("Enable LastNotConnected (exact gap on ‘Last Contacted’)", value=False)
+            if enable_nc:
+                # Show live count of exact-gap matches BEFORE apply
+                default_nc = min(6, max_nc) if max_nc > 0 else 0
+                exact_nc = st.slider("Days since last contacted (exact = N)", min_value=0, max_value=max_nc, value=default_nc, step=1)
+                # Count deals with exact gap = N (exclude NaT)
+                cnt_nc = int((d["_last_connected"].notna()) & (d["_days_since_connected"] == exact_nc))
+                st.caption(f"Matches now: **{cnt_nc:,}** deal(s) with exact gap = {exact_nc} day(s).")
+            else:
+                exact_nc = None
 
         with col_na:
-            enable_na = st.checkbox("Enable LastActivityNotDone filter", value=False,
-                                    help="Keeps deals with Last Activity ≥ M days ago (or unknown).")
-            thr_na = st.slider("Days since last activity ≥", min_value=0, max_value=180, value=15, step=1) if enable_na else 0
+            enable_na = st.checkbox("Enable LastActivityNotDone (exact gap on ‘Last Activity Date’)", value=False)
+            if enable_na:
+                default_na = min(6, max_na) if max_na > 0 else 0
+                exact_na = st.slider("Days since last activity (exact = N)", min_value=0, max_value=max_na, value=default_na, step=1)
+                cnt_na = int((d["_last_activity"].notna()) & (d["_days_since_activity"] == exact_na))
+                st.caption(f"Matches now: **{cnt_na:,}** deal(s) with exact gap = {exact_na} day(s).")
+            else:
+                exact_na = None
 
         # Build mask (start from all True)
         mask_stuck = pd.Series(True, index=d.index)
 
         if enable_nc:
             if last_connected_col:
-                mask_nc = d["_last_connected"].isna() | d["_days_since_connected"].ge(thr_nc)
+                mask_nc = d["_last_connected"].notna() & (d["_days_since_connected"] == exact_nc)
                 mask_stuck &= mask_nc
             else:
-                st.warning("Last Connected column not found — LastNotConnected filter cannot be applied.", icon="⚠️")
+                st.warning("‘Last Contacted’ column not found — cannot apply LastNotConnected filter.", icon="⚠️")
 
         if enable_na:
             if last_activity_col:
-                mask_na = d["_last_activity"].isna() | d["_days_since_activity"].ge(thr_na)
+                mask_na = d["_last_activity"].notna() & (d["_days_since_activity"] == exact_na)
                 mask_stuck &= mask_na
             else:
-                st.warning("Last Activity column not found — LastActivityNotDone filter cannot be applied.", icon="⚠️")
+                st.warning("‘Last Activity Date’ column not found — cannot apply LastActivityNotDone filter.", icon="⚠️")
 
-        # Apply filter to 'd' so downstream funnel & metrics use the selected inactivity slice
+        # Apply filter to 'd' so downstream funnel & metrics use the *exact-gap* subset
         if enable_nc or enable_na:
             before_ct = len(d)
             d = d.loc[mask_stuck].copy()
-            st.caption(f"Stuck/inactivity subset in scope: **{len(d):,}** rows (from {before_ct:,}).")
-            hide_payments_in_funnel = True
+            st.caption(f"Inactivity subset applied: **{len(d):,}** rows (from {before_ct:,}).")
+            hide_payments_in_funnel = True  # per requirement: hide Payment stage if either filter is used
 
     # ==== Cohort: deals CREATED within scope
     mask_created = d["_c"].dt.date.between(range_start, range_end)
@@ -2032,7 +2050,7 @@ elif view == "Stuck deals":
     pay_df = caldone_df.loc[pay_mask].copy()
     total_pay = int(len(pay_df))
 
-    # ==== Funnel summary (avoid % sign in column names to keep Altair happy)
+    # ==== Funnel summary (Payment hidden if inactivity filter is ON)
     funnel_rows = [
         {"Stage": "Created (T)",            "Count": total_created, "FromPrev_pct": 100.0},
         {"Stage": "Trial (First/Resched)",  "Count": total_trial,   "FromPrev_pct": (total_trial / total_created * 100.0) if total_created > 0 else 0.0},
@@ -2064,7 +2082,7 @@ elif view == "Stuck deals":
 
     # Quick debug line so you can see data even if bars look empty
     if hide_payments_in_funnel:
-        st.caption("Payment stage hidden because an inactivity filter is enabled (LastNotConnected / LastActivityNotDone).")
+        st.caption("Payment stage hidden because an inactivity filter is enabled (exact-gap filters).")
     st.caption(
         f"Created: {total_created} • Trial: {total_trial} • Cal Done: {total_caldone}" + ("" if hide_payments_in_funnel else f" • Payments: {total_pay}")
     )
