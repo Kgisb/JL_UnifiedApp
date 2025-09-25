@@ -960,192 +960,92 @@ elif view == "Predictibility":
         else:
             st.altair_chart(accuracy_scatter(bt), use_container_width=True)
 
-elif view == "Trend & Analysis":
-    st.subheader("Trend & Analysis – Grouped Drilldowns (Final rules)")
+    # ======================
+    # Inactivity snapshot (relative to today)
+    # ======================
+    st.markdown("### Inactivity snapshot (relative to today)")
 
-    # Group-by fields
-    available_groups, group_map = [], {}
-    if counsellor_col: available_groups.append("Academic Counsellor"); group_map["Academic Counsellor"] = counsellor_col
-    if country_col:    available_groups.append("Country");            group_map["Country"] = country_col
-    if source_col:     available_groups.append("JetLearn Deal Source"); group_map["JetLearn Deal Source"] = source_col
+    # Resolve columns flexibly
+    last_activity_col = find_col(df, ["LastActivityDate", "Last Activity Date", "LastActivityTest", "Last Activity"])
+    last_connected_col = find_col(df, ["LastConnectedDate", "Last Connected Date", "LastContacted", "Last Contacted"])
 
-    sel_group_labels = st.multiselect("Group by (pick one or more)", options=available_groups, default=available_groups[:1] if available_groups else [])
-    group_cols = [group_map[l] for l in sel_group_labels if l in group_map]
-
-    # Mode
-    level = st.radio("Mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ta_mode")
-
-    # Date scope
-    date_mode = st.radio("Date scope", ["This month", "Last month", "Custom date range"], index=0, horizontal=True, key="ta_dscope")
-    if date_mode == "This month":
-        range_start, range_end = month_bounds(today)
-        st.caption(f"Scope: **This month** ({range_start} → {range_end})")
-    elif date_mode == "Last month":
-        range_start, range_end = last_month_bounds(today)
-        st.caption(f"Scope: **Last month** ({range_start} → {range_end})")
-    else:
-        col_d1, col_d2 = st.columns(2)
-        with col_d1: range_start = st.date_input("Start date", value=today.replace(day=1), key="ta_custom_start")
-        with col_d2: range_end   = st.date_input("End date", value=month_bounds(today)[1], key="ta_custom_end")
-        if range_end < range_start:
-            st.error("End date cannot be before start date.")
-            st.stop()
-        st.caption(f"Scope: **Custom** ({range_start} → {range_end})")
-
-    # Metric picker (includes derived)
-    all_metrics = [
-        "Payment Received Date — Count",
-        "First Calibration Scheduled Date — Count",
-        "Calibration Rescheduled Date — Count",
-        "Calibration Done Date — Count",
-        "Create Date (deals) — Count",
-        "Future Calibration Scheduled — Count",
-    ]
-    metrics_selected = st.multiselect("Metrics to show", options=all_metrics, default=all_metrics, key="ta_metrics")
-
-    metric_cols = {
-        "Payment Received Date — Count": pay_col,
-        "First Calibration Scheduled Date — Count": first_cal_sched_col,
-        "Calibration Rescheduled Date — Count": cal_resched_col,
-        "Calibration Done Date — Count": cal_done_col,
-        "Create Date (deals) — Count": create_col,
-        "Future Calibration Scheduled — Count": None,  # derived
-    }
-
-    # Missing column warnings
-    miss = []
-    for m in metrics_selected:
-        if m == "Future Calibration Scheduled — Count":
-            if (first_cal_sched_col is None or first_cal_sched_col not in df_f.columns) and \
-               (cal_resched_col is None or cal_resched_col not in df_f.columns):
-                miss.append("Future Calibration Scheduled (needs First and/or Rescheduled)")
-        elif m != "Create Date (deals) — Count":
-            if (metric_cols.get(m) is None) or (metric_cols.get(m) not in df_f.columns):
-                miss.append(m)
-    if miss:
-        st.warning("Missing columns for: " + ", ".join(miss) + ". Those counts will show as 0.", icon="⚠️")
-
-    # Build table
-    def ta_count_table(
-        df_scope: pd.DataFrame,
-        group_cols: list[str],
-        mode: str,
-        range_start: date,
-        range_end: date,
-        create_col: str,
-        metric_cols: dict,
-        metrics_selected: list[str],
-        *,
-        first_cal_col: str | None,
-        cal_resched_col: str | None,
-    ) -> pd.DataFrame:
-
-        if not group_cols:
-            df_work = df_scope.copy()
-            df_work["_GroupDummy"] = "All"
-            group_cols_local = ["_GroupDummy"]
-        else:
-            df_work = df_scope.copy()
-            group_cols_local = group_cols
-
-        create_dt = coerce_datetime(df_work[create_col]).dt.date
-
-        if first_cal_col and first_cal_col in df_work.columns:
-            first_dt = coerce_datetime(df_work[first_cal_col])
-        else:
-            first_dt = pd.Series(pd.NaT, index=df_work.index)
-        if cal_resched_col and cal_resched_col in df_work.columns:
-            resch_dt = coerce_datetime(df_work[cal_resched_col])
-        else:
-            resch_dt = pd.Series(pd.NaT, index=df_work.index)
-
-        eff_cal = resch_dt.copy().fillna(first_dt)
-        eff_cal_date = eff_cal.dt.date
-
-        pop_mask_mtd = create_dt.between(range_start, range_end)
-
-        outs = []
-        for disp in metrics_selected:
-            col = metric_cols.get(disp)
-
-            if disp == "Create Date (deals) — Count":
-                idx = pop_mask_mtd if mode == "MTD" else create_dt.between(range_start, range_end)
-                gdf = df_work.loc[idx, group_cols_local].copy()
-                agg = gdf.assign(_one=1).groupby(group_cols_local)["_one"].sum().reset_index().rename(columns={"_one": disp}) if not gdf.empty else pd.DataFrame(columns=group_cols_local+[disp])
-                outs.append(agg)
-                continue
-
-            if disp == "Future Calibration Scheduled — Count":
-                if eff_cal_date is None:
-                    base_idx = pop_mask_mtd if mode == "MTD" else slice(None)
-                    target = df_work.loc[base_idx, group_cols_local] if mode == "MTD" else df_work[group_cols_local]
-                    agg = target.assign(**{disp:0}).groupby(group_cols_local)[disp].sum().reset_index() if not target.empty else pd.DataFrame(columns=group_cols_local+[disp])
-                    outs.append(agg)
-                    continue
-                future_mask = eff_cal_date > range_end
-                idx = (pop_mask_mtd & future_mask) if mode == "MTD" else future_mask
-                gdf = df_work.loc[idx, group_cols_local].copy()
-                agg = gdf.assign(_one=1).groupby(group_cols_local)["_one"].sum().reset_index().rename(columns={"_one": disp}) if not gdf.empty else pd.DataFrame(columns=group_cols_local+[disp])
-                outs.append(agg)
-                continue
-
-            if (not col) or (col not in df_work.columns):
-                base_idx = pop_mask_mtd if mode == "MTD" else slice(None)
-                target = df_work.loc[base_idx, group_cols_local] if mode == "MTD" else df_work[group_cols_local]
-                agg = target.assign(**{disp:0}).groupby(group_cols_local)[disp].sum().reset_index() if not target.empty else pd.DataFrame(columns=group_cols_local+[disp])
-                outs.append(agg)
-                continue
-
-            ev_date = coerce_datetime(df_work[col]).dt.date
-            ev_in_range = ev_date.between(range_start, range_end)
-
-            if mode == "MTD":
-                idx = pop_mask_mtd & ev_in_range
-            else:
-                idx = ev_in_range
-
-            gdf = df_work.loc[idx, group_cols_local].copy()
-            agg = gdf.assign(_one=1).groupby(group_cols_local)["_one"].sum().reset_index().rename(columns={"_one": disp}) if not gdf.empty else pd.DataFrame(columns=group_cols_local+[disp])
-            outs.append(agg)
-
-        if outs:
-            result = outs[0]
-            for f in outs[1:]:
-                result = result.merge(f, on=group_cols_local, how="outer")
-        else:
-            result = pd.DataFrame(columns=group_cols_local)
-
-        for m in metrics_selected:
-            if m not in result.columns:
-                result[m] = 0
-        result[metrics_selected] = result[metrics_selected].fillna(0).astype(int)
-        if metrics_selected:
-            result = result.sort_values(metrics_selected[0], ascending=False)
-        return result.reset_index(drop=True)
-
-    tbl = ta_count_table(
-        df_scope=df_f,
-        group_cols=group_cols,
-        mode=level,
-        range_start=range_start,
-        range_end=range_end,
-        create_col=create_col,
-        metric_cols=metric_cols,
-        metrics_selected=metrics_selected,
-        first_cal_col=first_cal_sched_col,
-        cal_resched_col=cal_resched_col,
+    # Toggle which measure to use
+    pick = st.radio(
+        "Measure",
+        ["Last Activity Date", "Last Connected"],
+        horizontal=True,
+        index=0,
+        help="Counts deals where the chosen 'last touch' happened ≥ N days ago, relative to today."
     )
 
-    st.markdown("### Output")
-    if tbl.empty:
-        st.info("No rows match the selected filters and date range.")
+    # Pick column based on toggle
+    if pick == "Last Activity Date":
+        col_pick = last_activity_col
+        missing_msg = "Last Activity Date column not found."
     else:
-        rename_map = {group_map.get(lbl): lbl for lbl in sel_group_labels}
-        show = tbl.rename(columns=rename_map)
-        st.dataframe(show, use_container_width=True)
+        col_pick = last_connected_col
+        missing_msg = "Last Connected column not found."
 
-        csv = show.to_csv(index=False).encode("utf-8")
-        st.download_button("Download CSV (Trend & Analysis)", data=csv, file_name="trend_analysis_final.csv", mime="text/csv")
+    if not col_pick or col_pick not in df_f.columns:
+        st.warning(missing_msg + " This snapshot cannot be computed for the selected option.", icon="⚠️")
+    else:
+        # Slider (seek bar): days since >= N
+        thr = st.slider("Days since last touch ≥", min_value=0, max_value=180, value=7, step=1)
+
+        # Normalized datetime and age in days (relative to today)
+        s = coerce_datetime(df_f[col_pick])
+        today_ts = pd.Timestamp(date.today())
+        # convert to age (days); future dates become negative ⇒ clip to 0 so they don't get counted accidentally
+        age_days = (today_ts - s).dt.days
+        age_days = age_days.where(s.notna(), np.nan).clip(lower=0)
+
+        # Include unknowns?
+        include_unknown = st.checkbox(
+            "Include deals with unknown/missing dates",
+            value=False,
+            help="When ON, deals with no date recorded are included in the count."
+        )
+
+        # Build mask: (known & age >= thr) OR (include unknown & missing)
+        mask_known_old = s.notna() & (age_days >= thr)
+        mask = mask_known_old | (include_unknown & s.isna())
+
+        # Count + preview
+        count_val = int(mask.sum())
+
+        # KPI card
+        st.markdown(
+            f"<div class='kpi-card'>"
+            f"<div class='kpi-title'>Deals with {pick.lower()} ≥ {thr} day(s) ago</div>"
+            f"<div class='kpi-value'>{count_val:,}</div>"
+            f"<div class='kpi-sub'>Reference date: {date.today().isoformat()} • "
+            f"{'Unknowns included' if include_unknown else 'Unknowns excluded'}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Optional small preview (top 200)
+        with st.expander("Preview matching deals (top 200)"):
+            show_cols = []
+            if create_col: show_cols.append(create_col)
+            show_cols.append(col_pick)
+            if counsellor_col: show_cols.append(counsellor_col)
+            if source_col: show_cols.append(source_col)
+            if country_col: show_cols.append(country_col)
+            prev = df_f.loc[mask, show_cols].copy() if show_cols else df_f.loc[mask].copy()
+
+            # Append computed "Days Since" for clarity
+            prev["_DaysSince"] = age_days.loc[prev.index]
+            prev = prev.sort_values("_DaysSince", ascending=False)
+            st.dataframe(prev.head(200), use_container_width=True)
+
+            # Download
+            st.download_button(
+                "Download CSV – Inactivity snapshot",
+                prev.to_csv(index=False).encode("utf-8"),
+                file_name=f"inactivity_snapshot_{'activity' if pick=='Last Activity Date' else 'connected'}_ge_{thr}d.csv",
+                mime="text/csv",
+            )
 
 elif view == "80-20":
     # Everything for 80-20 lives INSIDE this tab (own controls; no sidebar widgets)
