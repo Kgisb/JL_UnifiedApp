@@ -1902,11 +1902,9 @@ elif view == "Stuck deals":
         else:
             all_months = []
 
-        # Ensure at least the running month is present
         if not all_months:
             all_months = [str(pd.Period(date.today(), freq="M"))]
 
-        # Preselect running month if present; else fallback to last available month
         running_period = str(pd.Period(date.today(), freq="M"))
         default_idx = all_months.index(running_period) if running_period in all_months else len(all_months) - 1
 
@@ -1931,10 +1929,7 @@ elif view == "Stuck deals":
     # Effective trial date = min(First Cal, Rescheduled), NaT-safe
     d["_trial"] = d[["_f", "_r"]].min(axis=1, skipna=True)
 
-    # ==== Filter: Booking type (Pre-Book vs Self-Book) based on Trial + Slot
-    # Rule:
-    #   Pre-Book  = has a Trial date AND Calibration Slot (Deal) is non-empty
-    #   Self-Book = everything else (no trial OR empty slot)
+    # ==== Filter: Booking type (Pre-Book vs Self-Book)
     if calibration_slot_col and calibration_slot_col in d.columns:
         slot_series = d[calibration_slot_col].astype(str)
         _s = slot_series.str.strip().str.lower()
@@ -1957,7 +1952,6 @@ elif view == "Stuck deals":
         st.info("Calibration Slot (Deal) column not found — booking type filter not applied.")
 
     # ==== Inactivity filters (EXACT gap logic)
-    # Exact column names first, with graceful fallback
     last_activity_col = find_col(df_f, [
         "Last Activity Date", "LastActivityDate", "LastActivityTest", "Last Activity"
     ])
@@ -1973,9 +1967,11 @@ elif view == "Stuck deals":
     d["_days_since_activity"]  = (today_ts - d["_last_activity"].dt.normalize()).dt.days
     d["_days_since_connected"] = (today_ts - d["_last_connected"].dt.normalize()).dt.days
 
-    # Slider ranges based on observed data (fallbacks if all NaT)
-    max_nc = int(np.nanmax(d["_days_since_connected"])) if np.isfinite(np.nanmax(d["_days_since_connected"])) else 60
-    max_na = int(np.nanmax(d["_days_since_activity"]))  if np.isfinite(np.nanmax(d["_days_since_activity"]))  else 60
+    # Robust slider maxima (avoid nanmax on all-NaN slices)
+    conn_days = d["_days_since_connected"]
+    actv_days = d["_days_since_activity"]
+    max_nc = int(conn_days.dropna().max()) if conn_days.notna().any() else 60
+    max_na = int(actv_days.dropna().max()) if actv_days.notna().any() else 60
     max_nc = int(np.clip(max_nc, 0, 365))
     max_na = int(np.clip(max_na, 0, 365))
 
@@ -1987,11 +1983,10 @@ elif view == "Stuck deals":
         with col_nc:
             enable_nc = st.checkbox("Enable LastNotConnected (exact gap on ‘Last Contacted’)", value=False)
             if enable_nc:
-                # Show live count of exact-gap matches BEFORE apply
                 default_nc = min(6, max_nc) if max_nc > 0 else 0
                 exact_nc = st.slider("Days since last contacted (exact = N)", min_value=0, max_value=max_nc, value=default_nc, step=1)
-                # Count deals with exact gap = N (exclude NaT)
-                cnt_nc = int((d["_last_connected"].notna()) & (d["_days_since_connected"] == exact_nc))
+                # FIX: sum the boolean series to count matches
+                cnt_nc = int(((d["_last_connected"].notna()) & (d["_days_since_connected"] == exact_nc)).sum())
                 st.caption(f"Matches now: **{cnt_nc:,}** deal(s) with exact gap = {exact_nc} day(s).")
             else:
                 exact_nc = None
@@ -2001,7 +1996,8 @@ elif view == "Stuck deals":
             if enable_na:
                 default_na = min(6, max_na) if max_na > 0 else 0
                 exact_na = st.slider("Days since last activity (exact = N)", min_value=0, max_value=max_na, value=default_na, step=1)
-                cnt_na = int((d["_last_activity"].notna()) & (d["_days_since_activity"] == exact_na))
+                # FIX: sum the boolean series to count matches
+                cnt_na = int(((d["_last_activity"].notna()) & (d["_days_since_activity"] == exact_na)).sum())
                 st.caption(f"Matches now: **{cnt_na:,}** deal(s) with exact gap = {exact_na} day(s).")
             else:
                 exact_na = None
@@ -2023,12 +2019,11 @@ elif view == "Stuck deals":
             else:
                 st.warning("‘Last Activity Date’ column not found — cannot apply LastActivityNotDone filter.", icon="⚠️")
 
-        # Apply filter to 'd' so downstream funnel & metrics use the *exact-gap* subset
         if enable_nc or enable_na:
             before_ct = len(d)
             d = d.loc[mask_stuck].copy()
             st.caption(f"Inactivity subset applied: **{len(d):,}** rows (from {before_ct:,}).")
-            hide_payments_in_funnel = True  # per requirement: hide Payment stage if either filter is used
+            hide_payments_in_funnel = True  # hide payments when inactivity filter is used
 
     # ==== Cohort: deals CREATED within scope
     mask_created = d["_c"].dt.date.between(range_start, range_end)
@@ -2062,7 +2057,6 @@ elif view == "Stuck deals":
         )
     funnel_df = pd.DataFrame(funnel_rows)
 
-    # Always show something (even when all zeros)
     bar = alt.Chart(funnel_df).mark_bar(opacity=0.9).encode(
         x=alt.X("Count:Q", title="Count"),
         y=alt.Y("Stage:N", sort=list(funnel_df["Stage"])[::-1], title=""),
@@ -2080,14 +2074,13 @@ elif view == "Stuck deals":
     )
     st.altair_chart(bar + txt, use_container_width=True)
 
-    # Quick debug line so you can see data even if bars look empty
     if hide_payments_in_funnel:
         st.caption("Payment stage hidden because an inactivity filter is enabled (exact-gap filters).")
     st.caption(
-        f"Created: {total_created} • Trial: {total_trial} • Cal Done: {total_caldone}" + ("" if hide_payments_in_funnel else f" • Payments: {total_pay}")
+        f"Created: {total_created} • Trial: {total_trial} • Cal Done: {total_caldone}" + ("" if not (not hide_payments_in_funnel) else f" • Payments: {total_pay}")
     )
 
-    # ==== Propagation (average days) – computed only on the same filtered sets
+    # ==== Propagation (average days)
     def avg_days(src_series, dst_series) -> float:
         s = (dst_series - src_series).dt.days
         s = s.dropna()
@@ -2119,9 +2112,8 @@ elif view == "Stuck deals":
     st.markdown("### Month-on-Month comparison")
     compare_k = st.slider("Compare last N months (ending at selected month or current)", 2, 12, 6, step=1)
 
-    # Decide anchor month
     anchor_day = range_end if scope_mode == "Month" else date.today()
-    months = months_back_list(anchor_day, compare_k)  # returns list of monthly Periods
+    months = months_back_list(anchor_day, compare_k)
 
     def month_funnel(m_period: pd.Period):
         ms = date(m_period.year, m_period.month, 1)
@@ -2140,7 +2132,6 @@ elif view == "Stuck deals":
 
         py = int(coh_cd["_p"].dt.date.between(ms, me).sum())
 
-        # propagation avgs
         avg1 = avg_days(coh_tr["_c"], coh_tr["_trial"]) if not coh_tr.empty else np.nan
         avg2 = avg_days(coh_cd["_trial"], coh_cd["_fd"]) if not coh_cd.empty else np.nan
         avg3 = avg_days(coh_cd["_fd"], coh_cd["_p"]) if not coh_cd.empty else np.nan
@@ -2164,7 +2155,6 @@ elif view == "Stuck deals":
     if mom_tbl.empty:
         st.info("Not enough historical data to build month-on-month comparison.")
     else:
-        # Conversion step lines
         conv_long = mom_tbl.melt(
             id_vars=["Month"],
             value_vars=["Trial_from_Created_pct", "CalDone_from_Trial_pct", "Paid_from_CalDone_pct"],
@@ -2179,7 +2169,6 @@ elif view == "Stuck deals":
         ).properties(height=320, title="Step conversion% (MoM)")
         st.altair_chart(conv_chart, use_container_width=True)
 
-        # Propagation lines
         lag_long = mom_tbl.melt(
             id_vars=["Month"],
             value_vars=["Avg_Created_to_Trial_days", "Avg_Trial_to_CalDone_days", "Avg_CalDone_to_Payment_days"],
