@@ -1851,7 +1851,7 @@ elif view == "Stuck deals":
         ("Calibration Done Date", cal_done_col),
         ("Payment Received Date", pay_col),
     ]:
-        if not col_var or col_var not in df_f.columns:
+        if not col_var or not col_var in df_f.columns:
             missing_cols.append(col_label)
     if missing_cols:
         st.warning(
@@ -1956,6 +1956,62 @@ elif view == "Stuck deals":
     else:
         st.info("Calibration Slot (Deal) column not found — booking type filter not applied.")
 
+    # ==== Inactivity filters (LastNotConnected / LastActivityNotDone)
+    # Try to map your column names flexibly
+    last_activity_col = find_col(df_f, [
+        "LastActivityDate", "Last Activity Date", "LastActivityTest", "Last Activity"
+    ])
+    last_connected_col = find_col(df_f, [
+        "LastConnectedDate", "Last Connected Date", "LastContacted", "Last Contacted"
+    ])
+
+    # Prepare normalized last-touch datetime columns (NaT if missing)
+    d["_last_activity"]  = coerce_datetime(d[last_activity_col]) if (last_activity_col and last_activity_col in d.columns) else pd.Series(pd.NaT, index=d.index)
+    d["_last_connected"] = coerce_datetime(d[last_connected_col]) if (last_connected_col and last_connected_col in d.columns) else pd.Series(pd.NaT, index=d.index)
+
+    today_ts = pd.Timestamp(date.today())
+    d["_days_since_activity"]  = (today_ts - d["_last_activity"]).dt.days
+    d["_days_since_connected"] = (today_ts - d["_last_connected"]).dt.days
+
+    hide_payments_in_funnel = False  # default; will flip to True if any inactivity filter is used
+
+    with st.expander("Inactivity filters — LastNotConnected / LastActivityNotDone", expanded=False):
+        col_nc, col_na = st.columns(2)
+
+        with col_nc:
+            enable_nc = st.checkbox("Enable LastNotConnected filter", value=False,
+                                    help="Keeps deals with Last Connected ≥ N days ago (or unknown).")
+            thr_nc = st.slider("Days since last connected ≥", min_value=0, max_value=180, value=15, step=1) if enable_nc else 0
+
+        with col_na:
+            enable_na = st.checkbox("Enable LastActivityNotDone filter", value=False,
+                                    help="Keeps deals with Last Activity ≥ M days ago (or unknown).")
+            thr_na = st.slider("Days since last activity ≥", min_value=0, max_value=180, value=15, step=1) if enable_na else 0
+
+        # Build mask (start from all True)
+        mask_stuck = pd.Series(True, index=d.index)
+
+        if enable_nc:
+            if last_connected_col:
+                mask_nc = d["_last_connected"].isna() | d["_days_since_connected"].ge(thr_nc)
+                mask_stuck &= mask_nc
+            else:
+                st.warning("Last Connected column not found — LastNotConnected filter cannot be applied.", icon="⚠️")
+
+        if enable_na:
+            if last_activity_col:
+                mask_na = d["_last_activity"].isna() | d["_days_since_activity"].ge(thr_na)
+                mask_stuck &= mask_na
+            else:
+                st.warning("Last Activity column not found — LastActivityNotDone filter cannot be applied.", icon="⚠️")
+
+        # Apply filter to 'd' so downstream funnel & metrics use the selected inactivity slice
+        if enable_nc or enable_na:
+            before_ct = len(d)
+            d = d.loc[mask_stuck].copy()
+            st.caption(f"Stuck/inactivity subset in scope: **{len(d):,}** rows (from {before_ct:,}).")
+            hide_payments_in_funnel = True
+
     # ==== Cohort: deals CREATED within scope
     mask_created = d["_c"].dt.date.between(range_start, range_end)
     cohort = d.loc[mask_created].copy()
@@ -1981,8 +2037,11 @@ elif view == "Stuck deals":
         {"Stage": "Created (T)",            "Count": total_created, "FromPrev_pct": 100.0},
         {"Stage": "Trial (First/Resched)",  "Count": total_trial,   "FromPrev_pct": (total_trial / total_created * 100.0) if total_created > 0 else 0.0},
         {"Stage": "Calibration Done",       "Count": total_caldone, "FromPrev_pct": (total_caldone / total_trial * 100.0) if total_trial > 0 else 0.0},
-        {"Stage": "Payment Received",       "Count": total_pay,     "FromPrev_pct": (total_pay / total_caldone * 100.0) if total_caldone > 0 else 0.0},
     ]
+    if not hide_payments_in_funnel:
+        funnel_rows.append(
+            {"Stage": "Payment Received", "Count": total_pay, "FromPrev_pct": (total_pay / total_caldone * 100.0) if total_caldone > 0 else 0.0}
+        )
     funnel_df = pd.DataFrame(funnel_rows)
 
     # Always show something (even when all zeros)
@@ -2004,8 +2063,10 @@ elif view == "Stuck deals":
     st.altair_chart(bar + txt, use_container_width=True)
 
     # Quick debug line so you can see data even if bars look empty
+    if hide_payments_in_funnel:
+        st.caption("Payment stage hidden because an inactivity filter is enabled (LastNotConnected / LastActivityNotDone).")
     st.caption(
-        f"Created: {total_created} • Trial: {total_trial} • Cal Done: {total_caldone} • Payments: {total_pay}"
+        f"Created: {total_created} • Trial: {total_trial} • Cal Done: {total_caldone}" + ("" if hide_payments_in_funnel else f" • Payments: {total_pay}")
     )
 
     # ==== Propagation (average days) – computed only on the same filtered sets
@@ -2124,177 +2185,6 @@ elif view == "Stuck deals":
                 mime="text/csv",
             )
 
-elif view == "Daily business":
-    st.subheader("Daily business – Created vs Enrolments by time bucket")
-
-    # ----- Guards
-    if not create_col or not pay_col:
-        st.error("Required columns missing: Create Date / Payment Received Date.")
-        st.stop()
-
-    # ----- Range picker
-    rmode = st.radio("Range", ["Yesterday", "Today", "This Month", "Last Month", "Custom"], horizontal=True)
-    if rmode == "Yesterday":
-        range_start = today - timedelta(days=1); range_end = range_start
-    elif rmode == "Today":
-        range_start = today; range_end = today
-    elif rmode == "This Month":
-        range_start, range_end = month_bounds(today)
-    elif rmode == "Last Month":
-        range_start, range_end = last_month_bounds(today)
-    else:
-        c1, c2 = st.columns(2)
-        with c1: range_start = st.date_input("Start", value=month_bounds(today)[0], key="db_start")
-        with c2: range_end   = st.date_input("End",   value=month_bounds(today)[1], key="db_end")
-        if range_end < range_start:
-            st.error("End date cannot be before start date."); st.stop()
-    st.caption(f"Scope: **{range_start} → {range_end}**")
-
-    # ----- Granularity & stacking
-    gran = st.radio("Granularity", ["Day", "Week", "Month"], horizontal=True, index=0)
-    stack_by_src = st.checkbox("Stack by Deal Source", value=True, help="Off = single total series")
-    enroll_mode = st.radio(
-        "Enrolment counting mode",
-        ["Cohort (payments in window)", "Same-deal population (created-in-window → payments in window)"],
-        index=0, horizontal=False
-    )
-
-    # ----- Prep working frame
-    d = df_f.copy()
-    d["_c"] = coerce_datetime(d[create_col])
-    d["_p"] = coerce_datetime(d[pay_col])
-    # Source label (includes Unknown)
-    if source_col and source_col in d.columns:
-        d["_src"] = d[source_col].fillna("Unknown").astype(str)
-    else:
-        d["_src"] = "Unknown"
-
-    # Window masks
-    c_in = d["_c"].dt.date.between(range_start, range_end)
-    p_in = d["_p"].dt.date.between(range_start, range_end)
-
-    # ----- Bucketing helper
-    def add_bucket(df, col_dt, label):
-        if gran == "Day":
-            df[label] = df[col_dt].dt.date.astype(str)
-        elif gran == "Week":
-            # ISO weeks; label by week start (Mon)
-            wk = df[col_dt].dt.to_period("W-MON")
-            df[label] = wk.apply(lambda p: p.start_time.date().isoformat())
-        else:  # Month
-            df[label] = df[col_dt].dt.to_period("M").astype(str)
-        return df
-
-    # ----- Created (graph 1)
-    created = d.loc[c_in, ["_c", "_src"]].copy()
-    if created.empty:
-        created_buckets = pd.DataFrame(columns=["Bucket","Count"])
-    else:
-        created = add_bucket(created, "_c", "Bucket")
-        if stack_by_src:
-            created_buckets = (created.groupby(["Bucket","_src"]).size()
-                               .rename("Count").reset_index()
-                               .sort_values(["Bucket","_src"]))
-        else:
-            created_buckets = (created.groupby("Bucket").size()
-                               .rename("Count").reset_index()
-                               .sort_values("Bucket"))
-
-    # Build a complete bucket index to keep x-axis continuous
-    def all_bucket_labels(start_d, end_d, granularity):
-        if granularity == "Day":
-            return [d_.isoformat() for d_ in pd.date_range(start_d, end_d, freq="D").date]
-        elif granularity == "Week":
-            # weeks starting Monday covering the window
-            start_m = (pd.Timestamp(start_d) - pd.offsets.Week(weekday=0)).date()
-            end_m = (pd.Timestamp(end_d) + pd.offsets.Week(weekday=0)).date()
-            labs = sorted({(pd.Timestamp(x).to_period("W-MON").start_time.date().isoformat())
-                           for x in pd.date_range(start_m, end_m, freq="D").date})
-            return [l for l in labs if (pd.Timestamp(l).date() >= start_d and pd.Timestamp(l).date() <= end_d)]
-        else:
-            p_start = pd.Period(start_d, "M"); p_end = pd.Period(end_d, "M")
-            return [str(p) for p in pd.period_range(p_start, p_end, freq="M")]
-
-    bucket_order = all_bucket_labels(range_start, range_end, gran)
-
-    st.markdown("### Deals Created")
-    if created_buckets.empty:
-        st.info("No deals created in the selected window.")
-    else:
-        if stack_by_src:
-            created_buckets["Bucket"] = pd.Categorical(created_buckets["Bucket"], categories=bucket_order, ordered=True)
-            ch = alt.Chart(created_buckets).mark_bar(opacity=0.9).encode(
-                x=alt.X("Bucket:N", sort=bucket_order, title=""),
-                y=alt.Y("Count:Q", title="Deals created"),
-                color=alt.Color("_src:N", title="Deal Source", legend=alt.Legend(orient="bottom")),
-                tooltip=["Bucket:N","_src:N","Count:Q"]
-            ).properties(height=320, title="Deals created — stacked by source")
-        else:
-            created_buckets["Bucket"] = pd.Categorical(created_buckets["Bucket"], categories=bucket_order, ordered=True)
-            ch = alt.Chart(created_buckets).mark_line(point=True).encode(
-                x=alt.X("Bucket:N", sort=bucket_order, title=""),
-                y=alt.Y("Count:Q", title="Deals created"),
-                tooltip=["Bucket:N","Count:Q"]
-            ).properties(height=320, title="Deals created — totals")
-        st.altair_chart(ch, use_container_width=True)
-
-    # ----- Enrolments (graph 2)
-    if enroll_mode.startswith("Cohort"):
-        enrol = d.loc[p_in, ["_p","_src","_c"]].copy()
-    else:
-        # Same-deal population: restrict to deals created in window, then payments in window
-        base = d.loc[c_in, ["_c","_p","_src"]].copy()
-        enrol = base.loc[base["_p"].notna() & base["_p"].dt.date.between(range_start, range_end)]
-
-    if enrol.empty:
-        enrol_buckets = pd.DataFrame(columns=["Bucket","Count"])
-    else:
-        enrol = add_bucket(enrol, "_p", "Bucket")
-        if stack_by_src:
-            enrol_buckets = (enrol.groupby(["Bucket","_src"]).size()
-                             .rename("Count").reset_index()
-                             .sort_values(["Bucket","_src"]))
-        else:
-            enrol_buckets = (enrol.groupby("Bucket").size()
-                             .rename("Count").reset_index()
-                             .sort_values("Bucket"))
-
-    st.markdown("### Enrolments (Payments)")
-    if enrol_buckets.empty:
-        st.info("No enrolments found for the selected window/mode.")
-    else:
-        enrol_buckets["Bucket"] = pd.Categorical(enrol_buckets["Bucket"], categories=bucket_order, ordered=True)
-        title_suffix = "Cohort" if enroll_mode.startswith("Cohort") else "Same-deal population"
-        if stack_by_src:
-            ch2 = alt.Chart(enrol_buckets).mark_bar(opacity=0.9).encode(
-                x=alt.X("Bucket:N", sort=bucket_order, title=""),
-                y=alt.Y("Count:Q", title="Enrolments"),
-                color=alt.Color("_src:N", title="Deal Source", legend=alt.Legend(orient="bottom")),
-                tooltip=["Bucket:N","_src:N","Count:Q"]
-            ).properties(height=320, title=f"Enrolments — stacked by source • {title_suffix}")
-        else:
-            ch2 = alt.Chart(enrol_buckets).mark_line(point=True).encode(
-                x=alt.X("Bucket:N", sort=bucket_order, title=""),
-                y=alt.Y("Count:Q", title="Enrolments"),
-                tooltip=["Bucket:N","Count:Q"]
-            ).properties(height=320, title=f"Enrolments — totals • {title_suffix}")
-        st.altair_chart(ch2, use_container_width=True)
-
-    # ----- KPIs (window totals + conversion aligned to selected mode)
-    total_created = int(c_in.sum())
-    if enroll_mode.startswith("Cohort"):
-        total_enrol = int(p_in.sum())
-    else:
-        total_enrol = int(len(enrol))  # already filtered to created-in-window + paid-in-window
-    conv_pct = (total_enrol / total_created * 100.0) if total_created > 0 else 0.0
-
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Deals Created</div><div class='kpi-value'>{total_created:,}</div><div class='kpi-sub'>{range_start} → {range_end}</div></div>", unsafe_allow_html=True)
-    with k2:
-        st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Enrolments</div><div class='kpi-value'>{total_enrol:,}</div><div class='kpi-sub'>{'Cohort' if enroll_mode.startswith('Cohort') else 'Same-deal population'}</div></div>", unsafe_allow_html=True)
-    with k3:
-        st.markdown(f"<div class='kpi-card'><div class='kpi-title'>Conversion% (Enrolments / Created)</div><div class='kpi-value'>{conv_pct:.1f}%</div><div class='kpi-sub'>Num: {total_enrol:,} • Den: {total_created:,}</div></div>", unsafe_allow_html=True)
 
 elif view == "Dashboard":
     st.subheader("Dashboard – Key Business Snapshot")
