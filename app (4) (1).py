@@ -2424,35 +2424,32 @@ elif view == "Dashboard":
         kpi_block("This Month (MTD)", PERIODS[3][1], PERIODS[3][2])
 
     # ---- Predictability (this month) box ----
-        # ---- Predictability (this month) box ----
+            # ---- Predictability (this month) box ----
     st.markdown("<div class='section-title'>Predictability — This Month</div>", unsafe_allow_html=True)
 
     # Helper: dynamic targets based on Academic Counsellor global filter
     def get_dynamic_targets(sel_counsellors_list):
-        # If specific counsellor(s) selected (i.e., not "All") → small targets (AI=20, Math=8)
-        # Else → full-month org targets (AI=150, Math=50)
-        try:
-            if sel_counsellors_list and ("All" not in sel_counsellors_list):
-                ai_tgt, math_tgt = 20, 8
-            else:
-                ai_tgt, math_tgt = 150, 50
-        except Exception:
-            # Fallback if the selection list isn't available for any reason
+        # Specific counsellor(s) selected (i.e., not "All") → small targets
+        if sel_counsellors_list and ("All" not in sel_counsellors_list):
+            ai_tgt, math_tgt = 20, 8
+        else:
             ai_tgt, math_tgt = 150, 50
         return {"AI Coding": ai_tgt, "Math": math_tgt, "Total": ai_tgt + math_tgt}
 
     # Pull targets from current global selection
     dynamic_targets = get_dynamic_targets(sel_counsellors)
-    target_total = float(dynamic_targets["Total"])
-    target_ai    = float(dynamic_targets["AI Coding"])
-    target_math  = float(dynamic_targets["Math"])
+    tgt_ai   = float(dynamic_targets["AI Coding"])
+    tgt_math = float(dynamic_targets["Math"])
+    tgt_tot  = float(dynamic_targets["Total"])  # 200 or 28 depending on counsellor filter
 
-    # Re-use existing monthly forecast (A + B + C) by source (overall)
+    # Re-use existing monthly forecast (A + B + C) on the ALREADY FILTERED df_f (includes Track filter)
     lookback = 3
     weighted = True
-    tbl_pred, totals_pred = predict_running_month(df_f, create_col, pay_col, source_col, lookback, weighted, today=date.today())
+    tbl_pred, totals_pred = predict_running_month(
+        df_f, create_col, pay_col, source_col, lookback, weighted, today=date.today()
+    )
 
-    # Overall A, B, C and Projected (same as before)
+    # A, B, C and Projected for the CURRENT TRACK (since df_f already respects Track)
     A = float(totals_pred.get("A_Actual_ToDate", 0.0))
     B = float(totals_pred.get("B_Remaining_SameMonth", 0.0))
     C = float(totals_pred.get("C_Remaining_PrevMonths", 0.0))
@@ -2467,8 +2464,7 @@ elif view == "Dashboard":
     avg_actual_per_day    = A / elapsed_days if elapsed_days > 0 else 0.0
     avg_projected_per_day = projected / total_days if total_days > 0 else 0.0
 
-    # ===== Per-pipeline actuals (A) for AI vs Math, this month-to-date =====
-    # We'll compute current-month payments split by normalized pipeline to show required/day by pipeline.
+    # ===== Current-month A split by pipeline (from UN-aggregated rows within df_f) =====
     d_m = add_month_cols(df_f, create_col, pay_col)
     cur_period = pd.Period(date.today(), freq="M")
     cur_paid = d_m[d_m["_pay_m"] == cur_period].copy()
@@ -2481,18 +2477,29 @@ elif view == "Dashboard":
     A_ai   = float((pl_series == "AI Coding").sum())
     A_math = float((pl_series == "Math").sum())
 
-    # ===== Required averages to hit dynamic targets =====
-    # Overall
-    gap_total = max(0.0, target_total - A)
-    req_avg_total_per_day = (gap_total / remaining_days) if remaining_days > 0 else (0.0 if gap_total <= 0 else float("inf"))
+    # ===== Determine which targets to use, based on Track selection =====
+    # When Track != "Both", dashboard should show ONLY that track (no total / other track panels).
+    if track == "AI Coding":
+        target_total = tgt_ai
+        gap_total = max(0.0, target_total - A)  # A is AI-only because df_f is filtered by Track
+        req_avg_total_per_day = (gap_total / remaining_days) if remaining_days > 0 else (0.0 if gap_total <= 0 else float("inf"))
+        show_per_pipeline_panels = False
+        target_subtitle = "AI Coding target"
+    elif track == "Math":
+        target_total = tgt_math
+        gap_total = max(0.0, target_total - A)  # A is Math-only here
+        req_avg_total_per_day = (gap_total / remaining_days) if remaining_days > 0 else (0.0 if gap_total <= 0 else float("inf"))
+        show_per_pipeline_panels = False
+        target_subtitle = "Math target"
+    else:
+        # Both
+        target_total = tgt_tot
+        gap_total = max(0.0, target_total - A)  # A is TOTAL because df_f has both tracks
+        req_avg_total_per_day = (gap_total / remaining_days) if remaining_days > 0 else (0.0 if gap_total <= 0 else float("inf"))
+        show_per_pipeline_panels = True
+        target_subtitle = f"AI {int(tgt_ai)} + Math {int(tgt_math)}"
 
-    # By pipeline
-    gap_ai   = max(0.0, target_ai - A_ai)
-    gap_math = max(0.0, target_math - A_math)
-    req_ai_per_day   = (gap_ai / remaining_days) if remaining_days > 0 else (0.0 if gap_ai <= 0 else float("inf"))
-    req_math_per_day = (gap_math / remaining_days) if remaining_days > 0 else (0.0 if gap_math <= 0 else float("inf"))
-
-    # ===== Render KPIs =====
+    # ===== Render KPIs (always for the CURRENT TRACK scope in df_f) =====
     p1, p2, p3, p4 = st.columns(4)
     with p1:
         st.markdown(
@@ -2515,13 +2522,13 @@ elif view == "Dashboard":
             f"<div class='kpi-value'>{avg_projected_per_day:.2f}</div>"
             f"<div class='kpi-sub'>For the full month</div></div>", unsafe_allow_html=True)
 
-    # Overall target vs required/day
+    # Overall target (depends on Track) vs required/day
     t1, t2 = st.columns(2)
     with t1:
         st.markdown(
             f"<div class='kpi-card'><div class='kpi-title'>Target (dynamic)</div>"
             f"<div class='kpi-value'>{int(target_total)}</div>"
-            f"<div class='kpi-sub'>AI {int(target_ai)} + Math {int(target_math)}</div></div>", unsafe_allow_html=True)
+            f"<div class='kpi-sub'>{target_subtitle}</div></div>", unsafe_allow_html=True)
     with t2:
         if np.isfinite(req_avg_total_per_day):
             st.markdown(
@@ -2534,34 +2541,33 @@ elif view == "Dashboard":
                 f"<div class='kpi-value'>–</div>"
                 f"<div class='kpi-sub'>Target met or no days left</div></div>", unsafe_allow_html=True)
 
-    # Pipeline split: show current A and required/day vs dynamic per-pipeline targets
-    q1, q2 = st.columns(2)
-    with q1:
-        # AI Coding panel
-        if np.isfinite(req_ai_per_day):
-            req_ai_txt = f"{req_ai_per_day:.2f}"
-        else:
-            req_ai_txt = "–"
-        st.markdown(
-            f"<div class='kpi-card'>"
-            f"<div class='kpi-title'>AI Coding — Target {int(target_ai)}</div>"
-            f"<div class='kpi-value'>{int(A_ai)}</div>"
-            f"<div class='kpi-sub'>A (MTD payments) • Required/day: <b>{req_ai_txt}</b></div>"
-            f"</div>", unsafe_allow_html=True)
-    with q2:
-        # Math panel
-        if np.isfinite(req_math_per_day):
-            req_math_txt = f"{req_math_per_day:.2f}"
-        else:
-            req_math_txt = "–"
-        st.markdown(
-            f"<div class='kpi-card'>"
-            f"<div class='kpi-title'>Math — Target {int(target_math)}</div>"
-            f"<div class='kpi-value'>{int(A_math)}</div>"
-            f"<div class='kpi-sub'>A (MTD payments) • Required/day: <b>{req_math_txt}</b></div>"
-            f"</div>", unsafe_allow_html=True)
+    # When Track = Both, also show per-pipeline panels; when Track is AI/Math, hide them.
+    if show_per_pipeline_panels:
+        # Compute per-pipeline required/day against their own targets, but ONLY for visibility (df_f is "Both")
+        gap_ai   = max(0.0, tgt_ai - A_ai)
+        gap_math = max(0.0, tgt_math - A_math)
+        req_ai_per_day   = (gap_ai / remaining_days) if remaining_days > 0 else (0.0 if gap_ai <= 0 else float("inf"))
+        req_math_per_day = (gap_math / remaining_days) if remaining_days > 0 else (0.0 if gap_math <= 0 else float("inf"))
 
-    # Small stacked bar of A/B/C (visual) — unchanged
+        q1, q2 = st.columns(2)
+        with q1:
+            req_ai_txt = f"{req_ai_per_day:.2f}" if np.isfinite(req_ai_per_day) else "–"
+            st.markdown(
+                f"<div class='kpi-card'>"
+                f"<div class='kpi-title'>AI Coding — Target {int(tgt_ai)}</div>"
+                f"<div class='kpi-value'>{int(A_ai)}</div>"
+                f"<div class='kpi-sub'>A (MTD payments) • Required/day: <b>{req_ai_txt}</b></div>"
+                f"</div>", unsafe_allow_html=True)
+        with q2:
+            req_math_txt = f"{req_math_per_day:.2f}" if np.isfinite(req_math_per_day) else "–"
+            st.markdown(
+                f"<div class='kpi-card'>"
+                f"<div class='kpi-title'>Math — Target {int(tgt_math)}</div>"
+                f"<div class='kpi-value'>{int(A_math)}</div>"
+                f"<div class='kpi-sub'>A (MTD payments) • Required/day: <b>{req_math_txt}</b></div>"
+                f"</div>", unsafe_allow_html=True)
+
+    # A/B/C bar by source — still useful in any Track, since df_f is filtered already
     if not tbl_pred.empty:
         melt = tbl_pred.melt(
             id_vars=["Source"],
@@ -2574,7 +2580,7 @@ elif view == "Dashboard":
             y=alt.Y("Value:Q", stack=True, title="Enrolments"),
             color=alt.Color("Component:N", title="Component", legend=alt.Legend(orient="bottom")),
             tooltip=["Source:N","Component:N", alt.Tooltip("Value:Q", format=",.1f")]
-        ).properties(height=300, title="Predictability components by source (A, B, C)")
+        ).properties(height=300, title=f"Predictability components by source (A, B, C){' — '+track if track!='Both' else ''}")
         st.altair_chart(chart, use_container_width=True)
     else:
         st.info("No running-month payments in scope to visualize predictability components.")
