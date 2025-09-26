@@ -3437,26 +3437,42 @@ elif view == "AC Wise Detail":
         g_create = df_create.groupby(["Academic Counsellor", "Deal Source"], as_index=False)["Count"].sum()
         totals_create = g_create.groupby("Academic Counsellor", as_index=False)["Count"].sum().rename(columns={"Count": "Total"})
 
-        # Options
+        # --- Options (added Conversion % sort)
         col_opt1, col_opt2, col_opt3 = st.columns([1, 1, 1])
         with col_opt1:
-            normalize_pct = st.checkbox("Show Payments/Created as % of AC total (for the first two charts)", value=False, key="ac_stack_pct")
+            normalize_pct = st.checkbox(
+                "Show Payments/Created as % of AC total (for the first two charts)",
+                value=False, key="ac_stack_pct"
+            )
         with col_opt2:
             sort_mode = st.selectbox(
                 "Sort ACs by",
-                ["Payments (desc)", "Deals Created (desc)", "A–Z"],
+                ["Payments (desc)", "Deals Created (desc)", "Conversion % (desc)", "A–Z"],
                 index=0, key="ac_stack_sort"
             )
         with col_opt3:
             top_n = st.number_input("Max ACs to show", min_value=1, max_value=500, value=30, step=1, key="ac_stack_topn")
 
+        # --- Build AC ordering, including Conversion % option ---
         if sort_mode == "Payments (desc)":
             order_src = totals_pay.copy().sort_values("Total", ascending=False)
+
         elif sort_mode == "Deals Created (desc)":
             order_src = totals_create.copy().sort_values("Total", ascending=False)
-        else:
+
+        elif sort_mode == "Conversion % (desc)":
+            # AC-level conversion% = (sum Paid) / (sum Created) * 100
+            ac_conv = (
+                totals_pay.rename(columns={"Total": "Paid"})
+                .merge(totals_create.rename(columns={"Total": "Created"}), on="Academic Counsellor", how="outer")
+                .fillna({"Paid": 0, "Created": 0})
+            )
+            ac_conv["ConvPct"] = np.where(ac_conv["Created"] > 0, ac_conv["Paid"] / ac_conv["Created"] * 100.0, 0.0)
+            order_src = ac_conv.sort_values("ConvPct", ascending=False)[["Academic Counsellor"]]
+
+        else:  # "A–Z"
             base_totals = totals_pay if not totals_pay.empty else totals_create
-            order_src = base_totals.copy().sort_values("Academic Counsellor", ascending=True)
+            order_src = base_totals[["Academic Counsellor"]].copy().sort_values("Academic Counsellor", ascending=True)
 
         ac_order = order_src["Academic Counsellor"].head(int(top_n)).tolist() if not order_src.empty else []
 
@@ -3506,7 +3522,7 @@ elif view == "AC Wise Detail":
             )
             return chart
 
-        # ---- NEW: Conversion% stacked (Payments / Created within AC × Source)
+        # ---- Conversion% stacked (Payments / Created within AC × Source)
         g_merge = (
             g_create.rename(columns={"Count": "Created"})
                     .merge(g_pay.rename(columns={"Count": "Paid"}),
@@ -3578,4 +3594,3 @@ elif view == "AC Wise Detail":
                 mime="text/csv",
                 key="ac_stack_dl_conv"
             )
-
