@@ -1047,292 +1047,88 @@ elif view == "Predictibility":
                 mime="text/csv",
             )
 
-elif view == "Trend & Analysis":
-    st.subheader("Trend & Analysis – Grouped Drilldowns (Final rules)")
+elif view == "Trend and Analysis":
+    st.subheader("Trend and Analysis – MTD vs Cohort")
 
-    # Group-by fields
-    available_groups, group_map = [], {}
-    if counsellor_col: available_groups.append("Academic Counsellor"); group_map["Academic Counsellor"] = counsellor_col
-    if country_col:    available_groups.append("Country");            group_map["Country"] = country_col
-    if source_col:     available_groups.append("JetLearn Deal Source"); group_map["JetLearn Deal Source"] = source_col
-
-    sel_group_labels = st.multiselect("Group by (pick one or more)", options=available_groups, default=available_groups[:1] if available_groups else [])
-    group_cols = [group_map[l] for l in sel_group_labels if l in group_map]
-
-    # Mode
-    level = st.radio("Mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ta_mode")
-
-    # Date scope
-    date_mode = st.radio("Date scope", ["This month", "Last month", "Custom date range"], index=0, horizontal=True, key="ta_dscope")
-    if date_mode == "This month":
+    # ---- Date scope controls
+    st.markdown("**Select Date Range (Create Date basis)**")
+    c1, c2 = st.columns(2)
+    scope_pick = st.radio(
+        "Presets",
+        ["Yesterday", "Today", "This month", "Last month", "Custom"],
+        index=2, horizontal=True, key="ta_scope"
+    )
+    if scope_pick == "Yesterday":
+        range_start, range_end = yday, yday
+    elif scope_pick == "Today":
+        range_start, range_end = today, today
+    elif scope_pick == "This month":
         range_start, range_end = month_bounds(today)
-        st.caption(f"Scope: **This month** ({range_start} → {range_end})")
-    elif date_mode == "Last month":
+    elif scope_pick == "Last month":
         range_start, range_end = last_month_bounds(today)
-        st.caption(f"Scope: **Last month** ({range_start} → {range_end})")
     else:
-        col_d1, col_d2 = st.columns(2)
-        with col_d1: range_start = st.date_input("Start date", value=today.replace(day=1), key="ta_custom_start")
-        with col_d2: range_end   = st.date_input("End date", value=month_bounds(today)[1], key="ta_custom_end")
+        with c1:
+            range_start = st.date_input("Start (Create Date)", value=today.replace(day=1), key="ta_cstart")
+        with c2:
+            range_end = st.date_input("End (Create Date)", value=month_bounds(today)[1], key="ta_cend")
         if range_end < range_start:
             st.error("End date cannot be before start date.")
             st.stop()
-        st.caption(f"Scope: **Custom** ({range_start} → {range_end})")
 
-    # Metric picker (includes derived)
-    all_metrics = [
-        "Payment Received Date — Count",
-        "First Calibration Scheduled Date — Count",
-        "Calibration Rescheduled Date — Count",
-        "Calibration Done Date — Count",
-        "Create Date (deals) — Count",
-        "Future Calibration Scheduled — Count",
-    ]
-    metrics_selected = st.multiselect("Metrics to show", options=all_metrics, default=all_metrics, key="ta_metrics")
+    level = st.radio("Counting mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ta_mode")
+    st.caption(f"Create-date scope: **{range_start} → {range_end}** • Mode: **{level}**")
 
-    metric_cols = {
-        "Payment Received Date — Count": pay_col,
-        "First Calibration Scheduled Date — Count": first_cal_sched_col,
-        "Calibration Rescheduled Date — Count": cal_resched_col,
-        "Calibration Done Date — Count": cal_done_col,
-        "Create Date (deals) — Count": create_col,
-        "Future Calibration Scheduled — Count": None,  # derived
-    }
+    # ---- Core columns
+    if not create_col or not pay_col:
+        st.error("Missing required columns: Create Date or Payment Received Date.")
+        st.stop()
 
-    # Missing column warnings
-    miss = []
-    for m in metrics_selected:
-        if m == "Future Calibration Scheduled — Count":
-            if (first_cal_sched_col is None or first_cal_sched_col not in df_f.columns) and \
-               (cal_resched_col is None or cal_resched_col not in df_f.columns):
-                miss.append("Future Calibration Scheduled (needs First and/or Rescheduled)")
-        elif m != "Create Date (deals) — Count":
-            if (metric_cols.get(m) is None) or (metric_cols.get(m) not in df_f.columns):
-                miss.append(m)
-    if miss:
-        st.warning("Missing columns for: " + ", ".join(miss) + ". Those counts will show as 0.", icon="⚠️")
+    d = df_f.copy()
+    _cdate = coerce_datetime(d[create_col]).dt.date
+    _pdate = coerce_datetime(d[pay_col]).dt.date
 
-    # Build table
-    def ta_count_table(
-        df_scope: pd.DataFrame,
-        group_cols: list[str],
-        mode: str,
-        range_start: date,
-        range_end: date,
-        create_col: str,
-        metric_cols: dict,
-        metrics_selected: list[str],
-        *,
-        first_cal_col: str | None,
-        cal_resched_col: str | None,
-    ) -> pd.DataFrame:
+    # Masks
+    m_created = _cdate.between(range_start, range_end)
+    m_paid    = _pdate.between(range_start, range_end)
 
-        if not group_cols:
-            df_work = df_scope.copy()
-            df_work["_GroupDummy"] = "All"
-            group_cols_local = ["_GroupDummy"]
-        else:
-            df_work = df_scope.copy()
-            group_cols_local = group_cols
+    if level == "MTD":
+        created_mask   = m_created
+        converted_mask = m_created & m_paid
+    else:  # Cohort
+        created_mask   = m_created
+        converted_mask = m_paid
 
-        create_dt = coerce_datetime(df_work[create_col]).dt.date
+    # ---- KPI summary
+    kpi_created = int(created_mask.sum())
+    kpi_converted = int(converted_mask.sum())
+    conv_pct = (kpi_converted / kpi_created * 100.0) if kpi_created > 0 else 0.0
 
-        if first_cal_col and first_cal_col in df_work.columns:
-            first_dt = coerce_datetime(df_work[first_cal_col])
-        else:
-            first_dt = pd.Series(pd.NaT, index=df_work.index)
-        if cal_resched_col and cal_resched_col in df_work.columns:
-            resch_dt = coerce_datetime(df_work[cal_resched_col])
-        else:
-            resch_dt = pd.Series(pd.NaT, index=df_work.index)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Deals Created", f"{kpi_created:,}")
+    k2.metric("Payments Received", f"{kpi_converted:,}")
+    k3.metric("Conversion %", f"{conv_pct:.1f}%")
 
-        eff_cal = resch_dt.copy().fillna(first_dt)
-        eff_cal_date = eff_cal.dt.date
+    # ---- Trend chart: Deals Created vs Payments Received
+    trend_df = pd.DataFrame({
+        "Create Date": _cdate,
+        "Created": created_mask.astype(int),
+        "Converted": converted_mask.astype(int),
+    })
+    trend_df = trend_df.groupby("Create Date", as_index=False)[["Created", "Converted"]].sum()
 
-        pop_mask_mtd = create_dt.between(range_start, range_end)
-
-        outs = []
-        for disp in metrics_selected:
-            col = metric_cols.get(disp)
-
-            if disp == "Create Date (deals) — Count":
-                idx = pop_mask_mtd if mode == "MTD" else create_dt.between(range_start, range_end)
-                gdf = df_work.loc[idx, group_cols_local].copy()
-                agg = gdf.assign(_one=1).groupby(group_cols_local)["_one"].sum().reset_index().rename(columns={"_one": disp}) if not gdf.empty else pd.DataFrame(columns=group_cols_local+[disp])
-                outs.append(agg)
-                continue
-
-            if disp == "Future Calibration Scheduled — Count":
-                if eff_cal_date is None:
-                    base_idx = pop_mask_mtd if mode == "MTD" else slice(None)
-                    target = df_work.loc[base_idx, group_cols_local] if mode == "MTD" else df_work[group_cols_local]
-                    agg = target.assign(**{disp:0}).groupby(group_cols_local)[disp].sum().reset_index() if not target.empty else pd.DataFrame(columns=group_cols_local+[disp])
-                    outs.append(agg)
-                    continue
-                future_mask = eff_cal_date > range_end
-                idx = (pop_mask_mtd & future_mask) if mode == "MTD" else future_mask
-                gdf = df_work.loc[idx, group_cols_local].copy()
-                agg = gdf.assign(_one=1).groupby(group_cols_local)["_one"].sum().reset_index().rename(columns={"_one": disp}) if not gdf.empty else pd.DataFrame(columns=group_cols_local+[disp])
-                outs.append(agg)
-                continue
-
-                # For missing columns -> zeros
-            if (not col) or (col not in df_work.columns):
-                base_idx = pop_mask_mtd if mode == "MTD" else slice(None)
-                target = df_work.loc[base_idx, group_cols_local] if mode == "MTD" else df_work[group_cols_local]
-                agg = target.assign(**{disp:0}).groupby(group_cols_local)[disp].sum().reset_index() if not target.empty else pd.DataFrame(columns=group_cols_local+[disp])
-                outs.append(agg)
-                continue
-
-            ev_date = coerce_datetime(df_work[col]).dt.date
-            ev_in_range = ev_date.between(range_start, range_end)
-
-            if mode == "MTD":
-                idx = pop_mask_mtd & ev_in_range
-            else:
-                idx = ev_in_range
-
-            gdf = df_work.loc[idx, group_cols_local].copy()
-            agg = gdf.assign(_one=1).groupby(group_cols_local)["_one"].sum().reset_index().rename(columns={"_one": disp}) if not gdf.empty else pd.DataFrame(columns=group_cols_local+[disp])
-            outs.append(agg)
-
-        if outs:
-            result = outs[0]
-            for f in outs[1:]:
-                result = result.merge(f, on=group_cols_local, how="outer")
-        else:
-            result = pd.DataFrame(columns=group_cols_local)
-
-        for m in metrics_selected:
-            if m not in result.columns:
-                result[m] = 0
-        result[metrics_selected] = result[metrics_selected].fillna(0).astype(int)
-        if metrics_selected:
-            result = result.sort_values(metrics_selected[0], ascending=False)
-        return result.reset_index(drop=True)
-
-    tbl = ta_count_table(
-        df_scope=df_f,
-        group_cols=group_cols,
-        mode=level,
-        range_start=range_start,
-        range_end=range_end,
-        create_col=create_col,
-        metric_cols=metric_cols,
-        metrics_selected=metrics_selected,
-        first_cal_col=first_cal_sched_col,
-        cal_resched_col=cal_resched_col,
+    melt = trend_df.melt(id_vars=["Create Date"], var_name="Metric", value_name="Count")
+    chart = (
+        alt.Chart(melt)
+        .mark_bar(opacity=0.85)
+        .encode(
+            x=alt.X("Create Date:T", title="Date"),
+            y=alt.Y("Count:Q", title="Count"),
+            color=alt.Color("Metric:N", legend=alt.Legend(orient="bottom")),
+            tooltip=[alt.Tooltip("Create Date:T"), alt.Tooltip("Metric:N"), alt.Tooltip("Count:Q")]
+        )
+        .properties(height=350, title=f"Daily Trend — Deals Created vs Payments ({level})")
     )
-
-    st.markdown("### Output")
-    if tbl.empty:
-        st.info("No rows match the selected filters and date range.")
-    else:
-        rename_map = {group_map.get(lbl): lbl for lbl in sel_group_labels}
-        show = tbl.rename(columns=rename_map)
-        st.dataframe(show, use_container_width=True)
-
-        csv = show.to_csv(index=False).encode("utf-8")
-        st.download_button("Download CSV (Trend & Analysis)", data=csv, file_name="trend_analysis_final.csv", mime="text/csv")
-
-    # ---------------------------------------------------------------------
-    # Payment-month vs Create-month lag mix (M0, M-1, M-2, …) with month selector
-    # ---------------------------------------------------------------------
-    st.markdown("### Payment month mix by Create-month lag (M0 / M-1 / M-2 …)")
-
-    if not pay_col or pay_col not in df_f.columns or not create_col or create_col not in df_f.columns:
-        st.info("Create/Payment columns not found — cannot compute M0/M-1 lag mix.")
-    else:
-        d_lag = df_f.copy()
-        d_lag["_pay_dt"] = coerce_datetime(d_lag[pay_col])
-        d_lag["_create_dt"] = coerce_datetime(d_lag[create_col])
-
-        # Limit to payments inside the currently selected Trend & Analysis scope
-        pay_in_scope = d_lag["_pay_dt"].dt.date.between(range_start, range_end)
-        d_lag = d_lag.loc[pay_in_scope].copy()
-
-        if d_lag.empty or d_lag["_pay_dt"].isna().all():
-            st.info("No payments in the selected scope to build the M0/M-1/M-2 mix.")
-        else:
-            d_lag["_pay_m"] = d_lag["_pay_dt"].dt.to_period("M")
-            d_lag["_create_m"] = d_lag["_create_dt"].dt.to_period("M")
-
-            # Month selection filter (one or more payment months within scope)
-            pay_months = d_lag["_pay_m"].dropna().sort_values().unique()
-            pay_month_labels = [str(p) for p in pay_months]
-            default_label = pay_month_labels[-1] if pay_month_labels else None
-
-            col_l1, col_l2 = st.columns([1,1])
-            with col_l1:
-                sel_pay_m_labels = st.multiselect(
-                    "Select payments month(s) (M0 reference)",
-                    options=pay_month_labels,
-                    default=[default_label] if default_label else [],
-                    key="ta_mlag_paypick_multi"
-                )
-            with col_l2:
-                max_back = st.selectbox(
-                    "Show lags up to …",
-                    options=[3, 6, 9, 12, 18, 24],
-                    index=2,  # default 9 months
-                    key="ta_mlag_back"
-                )
-
-            if not sel_pay_m_labels:
-                st.info("Pick at least one payments month.")
-            else:
-                sel_pay_ms = [pd.Period(lbl, freq="M") for lbl in sel_pay_m_labels]
-                dm = d_lag[d_lag["_pay_m"].isin(sel_pay_ms)].copy()
-                dm = dm[dm["_create_m"].notna()].copy()
-
-                # Compute lag in months per row
-                pay_idx = (dm["_pay_m"].dt.year * 12 + dm["_pay_m"].dt.month)
-                c_idx   = (dm["_create_m"].dt.year * 12 + dm["_create_m"].dt.month)
-                dm["_lag"] = (pay_idx - c_idx).astype(int)
-
-                # Label & cap
-                dm["_lag_label"] = np.where(
-                    dm["_lag"] < 0, "Future (data issue)",
-                    "M" + dm["_lag"].apply(lambda x: f"-{x}" if x > 0 else "0")
-                )
-                ordered_lags = ["M0"] + [f"M-{i}" for i in range(1, int(max_back)+1)]
-                dm["_lag_cut"] = np.where(
-                    dm["_lag"] < 0, "Future (data issue)",
-                    np.where(dm["_lag"] <= int(max_back), dm["_lag_label"], f"Older than M-{int(max_back)}")
-                )
-
-                # Counts
-                lag_counts = (
-                    dm["_lag_cut"].value_counts()
-                      .rename_axis("Lag").reset_index(name="Count")
-                )
-                desired_order = ordered_lags + [f"Older than M-{int(max_back)}", "Future (data issue)"]
-                _ord_df = pd.DataFrame({"Lag": desired_order})
-                lag_counts = _ord_df.merge(lag_counts, on="Lag", how="left").fillna({"Count": 0}).astype({"Count": int})
-
-                # Chart title helper
-                months_title = ", ".join(sel_pay_m_labels) if len(sel_pay_m_labels) <= 5 else f"{len(sel_pay_m_labels)} months selected"
-
-                chart = (
-                    alt.Chart(lag_counts)
-                    .mark_bar(opacity=0.9)
-                    .encode(
-                        x=alt.X("Lag:N", sort=desired_order, title=f"Lag from Create month to Payment month ({months_title})"),
-                        y=alt.Y("Count:Q", title="Payments count"),
-                        tooltip=[alt.Tooltip("Lag:N"), alt.Tooltip("Count:Q")]
-                    )
-                    .properties(height=320, title=f"Payments by Create-month lag (M0 / M-1 / …) — {months_title}")
-                )
-                st.altair_chart(chart, use_container_width=True)
-
-                st.dataframe(lag_counts, use_container_width=True)
-                st.download_button(
-                    "Download CSV — Payment month lag mix",
-                    data=lag_counts.to_csv(index=False).encode("utf-8"),
-                    file_name=f"ta_payment_month_lag_mix_{len(sel_pay_m_labels)}_months.csv",
-                    mime="text/csv",
-                    key="ta_mlag_dl"
-                )
+    st.altair_chart(chart, use_container_width=True)
 
     # ---------------------------------------------------------------------
     # NEW: Referral business — Created vs Converted by Referral Intent Source
@@ -1343,31 +1139,31 @@ elif view == "Trend & Analysis":
 
     if (not referral_intent_col) or (referral_intent_col not in df_f.columns):
         st.info("Referral Intent Source column not found.")
-    elif (not create_col) or (create_col not in df_f.columns) or (not pay_col) or (pay_col not in df_f.columns):
-        st.info("Create Date or Payment Received Date not found.")
     else:
         d_ref = df_f.copy()
         d_ref["_ref"] = d_ref[referral_intent_col].fillna("Unknown").astype(str).str.strip()
 
-        # Dates
-        _cdate = coerce_datetime(d_ref[create_col]).dt.date
-        _pdate = coerce_datetime(d_ref[pay_col]).dt.date
+        # Exclude Unknown option
+        exclude_unknown = st.checkbox("Exclude 'Unknown'", value=False, key="ta_ref_exclude")
+        if exclude_unknown:
+            d_ref = d_ref[d_ref["_ref"] != "Unknown"]
 
-        m_created = _cdate.between(range_start, range_end)
-        m_paid    = _pdate.between(range_start, range_end)
+        _cdate_r = coerce_datetime(d_ref[create_col]).dt.date
+        _pdate_r = coerce_datetime(d_ref[pay_col]).dt.date
+        m_created_r = _cdate_r.between(range_start, range_end)
+        m_paid_r    = _pdate_r.between(range_start, range_end)
 
         if level == "MTD":
-            # Population = created in window; Converted = created in window AND paid in window
-            created_mask   = m_created
-            converted_mask = m_created & m_paid
-        else:  # Cohort = use event windows directly
-            created_mask   = m_created
-            converted_mask = m_paid
+            created_mask_r   = m_created_r
+            converted_mask_r = m_created_r & m_paid_r
+        else:
+            created_mask_r   = m_created_r
+            converted_mask_r = m_paid_r
 
         ref_tbl = pd.DataFrame({
             "Referral Intent Source": d_ref["_ref"],
-            "Created":  created_mask.astype(int),
-            "Converted": converted_mask.astype(int),
+            "Created":  created_mask_r.astype(int),
+            "Converted": converted_mask_r.astype(int),
         })
 
         grp = (ref_tbl
@@ -1375,10 +1171,10 @@ elif view == "Trend & Analysis":
                .sum(numeric_only=True)
                .sort_values("Created", ascending=False))
 
-        # Optional: top-N & sorting controls
+        # Optional controls
         col_r1, col_r2 = st.columns([1,1])
         with col_r1:
-            top_k = st.number_input("Show top N Referral Intent Sources by Created", 1, 1000, min(20, len(grp)) if len(grp) > 0 else 10, step=1, key="ta_ref_topn")
+            top_k = st.number_input("Show top N Referral Intent Sources", 1, 1000, min(20, len(grp)), step=1, key="ta_ref_topn")
         with col_r2:
             sort_metric = st.selectbox("Sort by", ["Created (desc)", "Converted (desc)", "A–Z"], index=0, key="ta_ref_sort")
 
@@ -1391,8 +1187,7 @@ elif view == "Trend & Analysis":
 
         grp_show = grp.head(int(top_k)) if len(grp) > int(top_k) else grp
 
-        # Melt for side-by-side (grouped) bars
-        melt = grp_show.melt(
+        melt_ref = grp_show.melt(
             id_vars=["Referral Intent Source"],
             value_vars=["Created", "Converted"],
             var_name="Metric",
@@ -1400,10 +1195,10 @@ elif view == "Trend & Analysis":
         )
 
         chart_ref = (
-            alt.Chart(melt)
+            alt.Chart(melt_ref)
             .mark_bar(opacity=0.9)
             .encode(
-                x=alt.X("Referral Intent Source:N", sort=grp_show["Referral Intent Source"].tolist(), title="Referral Intent Source"),
+                x=alt.X("Referral Intent Source:N", sort=grp_show["Referral Intent Source"].tolist()),
                 y=alt.Y("Count:Q", title="Count"),
                 color=alt.Color("Metric:N", title="", legend=alt.Legend(orient="bottom")),
                 xOffset=alt.XOffset("Metric:N"),
