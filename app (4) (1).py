@@ -3092,8 +3092,8 @@ elif view == "AC Wise Detail":
         st.error("Missing required columns (Create Date and Academic Counsellor).")
         st.stop()
 
-    # ---- Create-Date scope (population filter)
-    st.markdown("**Date scope (population filtered by Create Date)**")
+    # ---- Date scope (population defaulted by Create Date) + Counting mode
+    st.markdown("**Date scope (based on Create Date) & Counting mode**")
     c1, c2 = st.columns(2)
     scope_pick = st.radio(
         "Presets",
@@ -3116,15 +3116,18 @@ elif view == "AC Wise Detail":
         if scope_end < scope_start:
             st.error("End date cannot be before start date.")
             st.stop()
-    st.caption(f"Population scope by **Create Date**: {scope_start} → {scope_end}")
 
-    # ---- Filter base DF by Create Date window (respect global filters already applied in df_f)
+    # Mode mirrors the app's MTD vs Cohort semantics used elsewhere:
+    # - MTD  : event is counted only if (Create in scope) AND (Event date in scope)
+    # - Cohort: event counted if (Event date in scope), regardless of Create-date scope
+    mode = st.radio("Counting mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ac_mode")
+
+    st.caption(f"Create-date scope: **{scope_start} → {scope_end}** • Mode: **{mode}**")
+
+    # ---- Start from globally filtered df_f, then apply optional Deal Stage filter and create-date population (for MTD displays & Create counts)
     d = df_f.copy()
-    d["_create_dt"] = coerce_datetime(d[create_col]).dt.date
-    in_pop = d["_create_dt"].between(scope_start, scope_end)
-    d = d.loc[in_pop].copy()
 
-    # ---- Optional Deal Stage filter on the population
+    # Optional Deal Stage filter
     if dealstage_col and dealstage_col in d.columns:
         stage_vals = ["All"] + sorted(d[dealstage_col].dropna().astype(str).unique().tolist())
         sel_stages = st.multiselect(
@@ -3137,38 +3140,61 @@ elif view == "AC Wise Detail":
         st.caption("Deal Stage column not found — stage filter disabled.")
 
     if d.empty:
-        st.info("No rows in the selected Create Date scope (after filters).")
+        st.info("No rows after filters.")
         st.stop()
 
-    # ---- Normalized helper columns
+    # ---- Normalize dates
     d["_ac"] = d[counsellor_col].fillna("Unknown").astype(str)
 
-    _first = coerce_datetime(d[first_cal_sched_col]) if first_cal_sched_col and first_cal_sched_col in d.columns else pd.Series(pd.NaT, index=d.index)
-    _resch = coerce_datetime(d[cal_resched_col])     if cal_resched_col     and cal_resched_col     in d.columns else pd.Series(pd.NaT, index=d.index)
-    _done  = coerce_datetime(d[cal_done_col])        if cal_done_col        and cal_done_col        in d.columns else pd.Series(pd.NaT, index=d.index)
-    _paid  = coerce_datetime(d[pay_col])             if pay_col             and pay_col             in d.columns else pd.Series(pd.NaT, index=d.index)
+    _cdate = coerce_datetime(d[create_col]).dt.date
+    _first = coerce_datetime(d[first_cal_sched_col]).dt.date if first_cal_sched_col and first_cal_sched_col in d.columns else pd.Series(pd.NaT, index=d.index)
+    _resch = coerce_datetime(d[cal_resched_col]).dt.date     if cal_resched_col     and cal_resched_col     in d.columns else pd.Series(pd.NaT, index=d.index)
+    _done  = coerce_datetime(d[cal_done_col]).dt.date        if cal_done_col        and cal_done_col        in d.columns else pd.Series(pd.NaT, index=d.index)
+    _paid  = coerce_datetime(d[pay_col]).dt.date             if pay_col             and pay_col             in d.columns else pd.Series(pd.NaT, index=d.index)
 
-    # Referral Intent: treat common truthy patterns as "intent present"
+    # Masks
+    pop_mask = _cdate.between(scope_start, scope_end)  # population by Create Date
+    m_first = _first.between(scope_start, scope_end) if _first.notna().any() else pd.Series(False, index=d.index)
+    m_resch = _resch.between(scope_start, scope_end) if _resch.notna().any() else pd.Series(False, index=d.index)
+    m_done  = _done.between(scope_start, scope_end)  if _done.notna().any()  else pd.Series(False, index=d.index)
+    m_paid  = _paid.between(scope_start, scope_end)  if _paid.notna().any()  else pd.Series(False, index=d.index)
+
+    # Apply mode to event indicators
+    if mode == "MTD":
+        ind_create = pop_mask
+        ind_first  = pop_mask & m_first
+        ind_resch  = pop_mask & m_resch
+        ind_done   = pop_mask & m_done
+        ind_paid   = pop_mask & m_paid
+    else:  # Cohort
+        # Create counts still reflect the Create-date scope, while events use event-date-only scope
+        ind_create = pop_mask
+        ind_first  = m_first
+        ind_resch  = m_resch
+        ind_done   = m_done
+        ind_paid   = m_paid
+
+    # Referral Intent – treat truthy strings as intent present; count against Create-date scope
     def _is_ref_intent(x):
         if pd.isna(x): return False
         s = str(x).strip().lower()
         return (s in {"yes","y","true","t","1"}) or ("referr" in s) or (s not in {"", "no", "n", "false", "0", "none", "nan"})
-
     ref_intent_present = (
         d[referral_intent_col].map(_is_ref_intent)
         if referral_intent_col and referral_intent_col in d.columns
         else pd.Series(False, index=d.index)
     )
+    ind_ref_intent = pop_mask & ref_intent_present
 
-    # ---- Build AC-wise table by precomputing indicator columns, then summing
+    # ---- Build AC-wise table
     sub = pd.DataFrame({
         "Academic Counsellor": d["_ac"],
-        "Create Date — Count": 1,
-        "First Cal — Count": _first.notna().astype(int),
-        "Cal Rescheduled — Count": _resch.notna().astype(int),
-        "Cal Done — Count": _done.notna().astype(int),
-        "Payment Received — Count": _paid.notna().astype(int),
-        "Referral Intent (sales) — Count": ref_intent_present.astype(int),
+        "Create Date — Count": ind_create.astype(int),
+        "First Cal — Count": ind_first.astype(int),
+        "Cal Rescheduled — Count": ind_resch.astype(int),
+        "Cal Done — Count": ind_done.astype(int),
+        "Payment Received — Count": ind_paid.astype(int),
+        "Referral Intent (sales) — Count": ind_ref_intent.astype(int),
     })
     agg = (
         sub.groupby("Academic Counsellor", as_index=False)
@@ -3176,12 +3202,12 @@ elif view == "AC Wise Detail":
            .sort_values("Create Date — Count", ascending=False)
     )
 
-    st.markdown("### AC-wise counts (population = deals created in selected scope)")
+    st.markdown("### AC-wise counts")
     st.dataframe(agg, use_container_width=True)
     st.download_button(
         "Download CSV — AC-wise counts",
         data=agg.to_csv(index=False).encode("utf-8"),
-        file_name="ac_wise_counts.csv",
+        file_name=f"ac_wise_counts_{mode.lower()}.csv",
         mime="text/csv",
         key="ac_dl_counts"
     )
@@ -3214,7 +3240,7 @@ elif view == "AC Wise Detail":
     st.download_button(
         "Download CSV — Conversion %",
         data=pct_tbl.to_csv(index=False).encode("utf-8"),
-        file_name="ac_wise_conversion_percent.csv",
+        file_name=f"ac_wise_conversion_percent_{mode.lower()}.csv",
         mime="text/csv",
         key="ac_dl_pct"
     )
@@ -3224,13 +3250,13 @@ elif view == "AC Wise Detail":
     num_sum = int(agg[numer_label].sum())
     overall_pct = (num_sum / den_sum * 100.0) if den_sum > 0 else 0.0
     st.markdown(
-        f"<div class='kpi-card'><div class='kpi-title'>Overall {numer_label} / {denom_label}</div>"
+        f"<div class='kpi-card'><div class='kpi-title'>Overall {numer_label} / {denom_label} ({mode})</div>"
         f"<div class='kpi-value'>{overall_pct:.1f}%</div>"
         f"<div class='kpi-sub'>Num: {num_sum:,} • Den: {den_sum:,}</div></div>",
         unsafe_allow_html=True
     )
 
-    # ---- Breakdown table 2: choose grouping (Deal Source or Country) with AC
+    # ---- Breakdown: AC × (Deal Source or Country)
     st.markdown("### AC × (Deal Source or Country) breakdown")
     grp_mode = st.radio("Group by", ["JetLearn Deal Source", "Country"], index=0, horizontal=True, key="ac_grp_mode")
 
@@ -3252,12 +3278,12 @@ elif view == "AC Wise Detail":
         sub2 = pd.DataFrame({
             "Academic Counsellor": d["_ac"],
             "_grp": d["_grp"],
-            "Create Date — Count": 1,
-            "First Cal — Count": _first.notna().astype(int),
-            "Cal Rescheduled — Count": _resch.notna().astype(int),
-            "Cal Done — Count": _done.notna().astype(int),
-            "Payment Received — Count": _paid.notna().astype(int),
-            "Referral Intent (sales) — Count": ref_intent_present.astype(int),
+            "Create Date — Count": ind_create.astype(int),
+            "First Cal — Count": ind_first.astype(int),
+            "Cal Rescheduled — Count": ind_resch.astype(int),
+            "Cal Done — Count": ind_done.astype(int),
+            "Payment Received — Count": ind_paid.astype(int),
+            "Referral Intent (sales) — Count": ind_ref_intent.astype(int),
         })
         gb = (
             sub2.groupby(["Academic Counsellor","_grp"], as_index=False)
@@ -3268,9 +3294,9 @@ elif view == "AC Wise Detail":
 
         st.dataframe(gb, use_container_width=True)
         st.download_button(
-            f"Download CSV — AC × {grp_mode} breakdown",
+            f"Download CSV — AC × {grp_mode} breakdown ({mode})",
             data=gb.to_csv(index=False).encode("utf-8"),
-            file_name=f"ac_breakdown_by_{'deal_source' if grp_mode.startswith('JetLearn') else 'country'}.csv",
+            file_name=f"ac_breakdown_by_{'deal_source' if grp_mode.startswith('JetLearn') else 'country'}_{mode.lower()}.csv",
             mime="text/csv",
             key="ac_dl_breakdown"
         )
