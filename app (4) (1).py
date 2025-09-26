@@ -1236,6 +1236,7 @@ elif view == "Trend & Analysis":
 
     # ---------------------------------------------------------------------
     # NEW: Payment-month vs Create-month lag mix (M0, M-1, M-2, …)
+    # Added: month selection filter (single or multiple months)
     # ---------------------------------------------------------------------
     st.markdown("### Payment month mix by Create-month lag (M0 / M-1 / M-2 …)")
 
@@ -1250,26 +1251,24 @@ elif view == "Trend & Analysis":
         pay_in_scope = d_lag["_pay_dt"].dt.date.between(range_start, range_end)
         d_lag = d_lag.loc[pay_in_scope].copy()
 
-        # If no payments in scope, bail out early
         if d_lag.empty or d_lag["_pay_dt"].isna().all():
             st.info("No payments in the selected scope to build the M0/M-1/M-2 mix.")
         else:
-            # Build month periods
             d_lag["_pay_m"] = d_lag["_pay_dt"].dt.to_period("M")
             d_lag["_create_m"] = d_lag["_create_dt"].dt.to_period("M")
 
-            # Choose which payments month to analyze (if many months in custom scope)
+            # Month selection filter (one or more payment months within scope)
             pay_months = d_lag["_pay_m"].dropna().sort_values().unique()
             pay_month_labels = [str(p) for p in pay_months]
-            default_idx = len(pay_month_labels) - 1 if pay_month_labels else 0
+            default_label = pay_month_labels[-1] if pay_month_labels else None
 
             col_l1, col_l2 = st.columns([1,1])
             with col_l1:
-                sel_pay_m_label = st.selectbox(
-                    "Select payments month (M0 reference)",
+                sel_pay_m_labels = st.multiselect(
+                    "Select payments month(s) (M0 reference)",
                     options=pay_month_labels,
-                    index=default_idx,
-                    key="ta_mlag_paypick"
+                    default=[default_label] if default_label else [],
+                    key="ta_mlag_paypick_multi"
                 )
             with col_l2:
                 max_back = st.selectbox(
@@ -1279,62 +1278,58 @@ elif view == "Trend & Analysis":
                     key="ta_mlag_back"
                 )
 
-            if sel_pay_m_label:
-                sel_pay_m = pd.Period(sel_pay_m_label, freq="M")
-
-                # Keep only rows for the selected payments month
-                dm = d_lag[d_lag["_pay_m"] == sel_pay_m].copy()
-                # Compute lag in months: pay_month_index - create_month_index
+            if not sel_pay_m_labels:
+                st.info("Pick at least one payments month.")
+            else:
+                sel_pay_ms = [pd.Period(lbl, freq="M") for lbl in sel_pay_m_labels]
+                dm = d_lag[d_lag["_pay_m"].isin(sel_pay_ms)].copy()
                 dm = dm[dm["_create_m"].notna()].copy()
+
+                # Compute lag in months per row
                 pay_idx = (dm["_pay_m"].dt.year * 12 + dm["_pay_m"].dt.month)
                 c_idx   = (dm["_create_m"].dt.year * 12 + dm["_create_m"].dt.month)
                 dm["_lag"] = (pay_idx - c_idx).astype(int)
 
-                # Keep only plausible lags (>=0). <0 goes to "Future (data issue)" bucket.
+                # Label & cap
                 dm["_lag_label"] = np.where(
                     dm["_lag"] < 0, "Future (data issue)",
                     "M" + dm["_lag"].apply(lambda x: f"-{x}" if x > 0 else "0")
                 )
-
-                # Ordered list of lag labels M0, M-1, ..., up to max_back
                 ordered_lags = ["M0"] + [f"M-{i}" for i in range(1, int(max_back)+1)]
-
-                # Bucket older than max_back
                 dm["_lag_cut"] = np.where(
                     dm["_lag"] < 0, "Future (data issue)",
                     np.where(dm["_lag"] <= int(max_back), dm["_lag_label"], f"Older than M-{int(max_back)}")
                 )
 
-                # Counts by lag
+                # Counts
                 lag_counts = (
                     dm["_lag_cut"].value_counts()
                       .rename_axis("Lag").reset_index(name="Count")
                 )
-
-                # Reorder to desired order and ensure all labels appear
                 desired_order = ordered_lags + [f"Older than M-{int(max_back)}", "Future (data issue)"]
                 _ord_df = pd.DataFrame({"Lag": desired_order})
                 lag_counts = _ord_df.merge(lag_counts, on="Lag", how="left").fillna({"Count": 0}).astype({"Count": int})
 
-                # Chart
+                # Chart title helper
+                months_title = ", ".join(sel_pay_m_labels) if len(sel_pay_m_labels) <= 5 else f"{len(sel_pay_m_labels)} months selected"
+
                 chart = (
                     alt.Chart(lag_counts)
                     .mark_bar(opacity=0.9)
                     .encode(
-                        x=alt.X("Lag:N", sort=desired_order, title=f"Lag from Create month to Payment month ({sel_pay_m_label})"),
+                        x=alt.X("Lag:N", sort=desired_order, title=f"Lag from Create month to Payment month ({months_title})"),
                         y=alt.Y("Count:Q", title="Payments count"),
                         tooltip=[alt.Tooltip("Lag:N"), alt.Tooltip("Count:Q")]
                     )
-                    .properties(height=320, title=f"Payments in {sel_pay_m_label} by Create-month lag (M0 / M-1 / …)")
+                    .properties(height=320, title=f"Payments by Create-month lag (M0 / M-1 / …) — {months_title}")
                 )
                 st.altair_chart(chart, use_container_width=True)
 
-                # Table + download
                 st.dataframe(lag_counts, use_container_width=True)
                 st.download_button(
                     "Download CSV — Payment month lag mix",
                     data=lag_counts.to_csv(index=False).encode("utf-8"),
-                    file_name=f"ta_payment_month_lag_mix_{sel_pay_m_label.replace('-', '')}.csv",
+                    file_name=f"ta_payment_month_lag_mix_{len(sel_pay_m_labels)}_months.csv",
                     mime="text/csv",
                     key="ta_mlag_dl"
                 )
