@@ -3153,7 +3153,7 @@ elif view == "AC Wise Detail":
         ind_resch  = pop_mask & m_resch
         ind_done   = pop_mask & m_done
         ind_paid   = pop_mask & m_paid
-    else:  # Cohort (events can happen anywhere in range; population still by Create Date)
+    else:  # Cohort
         ind_create = pop_mask
         ind_first  = m_first
         ind_resch  = m_resch
@@ -3242,7 +3242,7 @@ elif view == "AC Wise Detail":
         key="ac_dl_pct"
     )
 
-    # Overall KPI (from currently shown table)
+    # Overall KPI
     den_sum = int(pct_tbl[denom_label].sum())
     num_sum = int(pct_tbl[numer_label].sum())
     overall_pct = (num_sum / den_sum * 100.0) if den_sum > 0 else 0.0
@@ -3308,8 +3308,8 @@ elif view == "AC Wise Detail":
             key="ac_dl_breakdown"
         )
 
-    # ==== NEW: AC × Deal Source — Stacked charts (Payments & Deals Created, side-by-side) ====
-    st.markdown("### AC × Deal Source — Stacked charts (Payments & Deals Created)")
+    # ==== AC × Deal Source — Stacked charts (Payments, Deals Created, and Conversion%) ====
+    st.markdown("### AC × Deal Source — Stacked charts (Payments, Deals Created & Conversion %)")
 
     if (not source_col) or (source_col not in d.columns):
         st.info("Deal Source column not found — cannot draw stacked charts.")
@@ -3342,7 +3342,7 @@ elif view == "AC Wise Detail":
         # Options
         col_opt1, col_opt2, col_opt3 = st.columns([1, 1, 1])
         with col_opt1:
-            normalize_pct = st.checkbox("Show as % of AC total", value=False, key="ac_stack_pct")
+            normalize_pct = st.checkbox("Show Payments/Created as % of AC total (for the first two charts)", value=False, key="ac_stack_pct")
         with col_opt2:
             sort_mode = st.selectbox(
                 "Sort ACs by",
@@ -3376,15 +3376,15 @@ elif view == "AC Wise Detail":
         g_pay_c    = prep_for_chart(g_pay, totals_pay)
         g_create_c = prep_for_chart(g_create, totals_create)
 
-        def stacked_chart(g, title):
+        def stacked_chart(g, title, use_pct):
             if g.empty:
                 return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_bar()
 
             y_field = alt.Y(
-                "Pct:Q" if normalize_pct else "Count:Q",
-                title="% of AC total" if normalize_pct else "Count",
+                ("Pct:Q" if use_pct else "Count:Q"),
+                title=("% of AC total" if use_pct else "Count"),
                 stack=True,
-                scale=alt.Scale(domain=[0, 100]) if normalize_pct else alt.Undefined
+                scale=(alt.Scale(domain=[0, 100]) if use_pct else alt.Undefined)
             )
             tooltips = [
                 alt.Tooltip("Academic Counsellor:N"),
@@ -3392,7 +3392,7 @@ elif view == "AC Wise Detail":
                 alt.Tooltip("Count:Q", title="Count"),
                 alt.Tooltip("Total:Q", title="AC Total"),
             ]
-            if normalize_pct:
+            if use_pct:
                 tooltips.append(alt.Tooltip("Pct:Q", title="% of AC", format=".1f"))
 
             chart = (
@@ -3404,21 +3404,59 @@ elif view == "AC Wise Detail":
                     color=alt.Color("Deal Source:N", legend=alt.Legend(orient="bottom", title="Deal Source")),
                     tooltip=tooltips,
                 )
-                .properties(height=380, title=title)
+                .properties(height=360, title=title)
             )
             return chart
 
-        col_pay, col_create = st.columns(2)
+        # ---- NEW: Conversion% stacked (Payments / Created within AC × Source)
+        g_merge = (
+            g_create.rename(columns={"Count": "Created"})
+                    .merge(g_pay.rename(columns={"Count": "Paid"}),
+                           on=["Academic Counsellor", "Deal Source"], how="outer")
+                    .fillna({"Created": 0, "Paid": 0})
+        )
+        # keep AC order and top_n selection
+        if ac_order:
+            g_merge = g_merge[g_merge["Academic Counsellor"].isin(ac_order)].copy()
+            g_merge["Academic Counsellor"] = pd.Categorical(g_merge["Academic Counsellor"], categories=ac_order, ordered=True)
+
+        g_merge["ConvPct"] = np.where(g_merge["Created"] > 0, g_merge["Paid"] / g_merge["Created"] * 100.0, 0.0)
+
+        def conversion_chart(g):
+            if g.empty:
+                return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_bar()
+            tooltips = [
+                alt.Tooltip("Academic Counsellor:N"),
+                alt.Tooltip("Deal Source:N"),
+                alt.Tooltip("Created:Q"),
+                alt.Tooltip("Paid:Q"),
+                alt.Tooltip("ConvPct:Q", title="Conversion %", format=".1f"),
+            ]
+            return (
+                alt.Chart(g)
+                .mark_bar(opacity=0.9)
+                .encode(
+                    x=alt.X("Academic Counsellor:N", sort=ac_order, title="Academic Counsellor"),
+                    y=alt.Y("ConvPct:Q", title="Conversion % (Paid / Created)", scale=alt.Scale(domain=[0, 100]), stack=True),
+                    color=alt.Color("Deal Source:N", legend=alt.Legend(orient="bottom", title="Deal Source")),
+                    tooltip=tooltips,
+                )
+                .properties(height=360, title="Conversion % — stacked by Deal Source")
+            )
+
+        col_pay, col_create, col_conv = st.columns(3)
         with col_pay:
             st.altair_chart(
-                stacked_chart(g_pay_c, "Payments (Payment Received — stacked by Deal Source)"),
+                stacked_chart(g_pay_c, "Payments (Payment Received — stacked by Deal Source)", use_pct=normalize_pct),
                 use_container_width=True
             )
         with col_create:
             st.altair_chart(
-                stacked_chart(g_create_c, "Deals Created (Create Date — stacked by Deal Source)"),
+                stacked_chart(g_create_c, "Deals Created (Create Date — stacked by Deal Source)", use_pct=normalize_pct),
                 use_container_width=True
             )
+        with col_conv:
+            st.altair_chart(conversion_chart(g_merge), use_container_width=True)
 
         with st.expander("Download data used in stacked charts"):
             st.download_button(
@@ -3435,3 +3473,11 @@ elif view == "AC Wise Detail":
                 mime="text/csv",
                 key="ac_stack_dl_created"
             )
+            st.download_button(
+                "Download CSV — Conversion% by AC × Deal Source",
+                data=g_merge.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
+                file_name="ac_by_dealsource_conversion_pct.csv",
+                mime="text/csv",
+                key="ac_stack_dl_conv"
+            )
+
