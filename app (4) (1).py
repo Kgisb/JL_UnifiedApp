@@ -3176,9 +3176,8 @@ elif view == "Lead Movement":
 elif view == "AC Wise Detail":
     st.subheader("AC Wise Detail – Create-date scoped counts & % conversions")
 
-    # ---- Column mappings (incl. Referral Intent Source)
+    # ---- Required cols & special columns
     referral_intent_col = find_col(df, ["Referral Intent Source", "Referral intent source"])
-
     if not create_col or not counsellor_col:
         st.error("Missing required columns (Create Date and Academic Counsellor).")
         st.stop()
@@ -3211,7 +3210,7 @@ elif view == "AC Wise Detail":
     mode = st.radio("Counting mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ac_mode")
     st.caption(f"Create-date scope: **{scope_start} → {scope_end}** • Mode: **{mode}**")
 
-    # ---- Start from globally filtered df_f, then optional Deal Stage filter
+    # ---- Start from globally filtered df_f, optional Deal Stage filter
     d = df_f.copy()
 
     if dealstage_col and dealstage_col in d.columns:
@@ -3229,7 +3228,7 @@ elif view == "AC Wise Detail":
         st.info("No rows after filters.")
         st.stop()
 
-    # ---- Normalize dates & keys
+    # ---- Normalize helper columns
     d["_ac"] = d[counsellor_col].fillna("Unknown").astype(str)
 
     _cdate = coerce_datetime(d[create_col]).dt.date
@@ -3265,14 +3264,13 @@ elif view == "AC Wise Detail":
         sales_generated_mask = (_ref == "sales generated")
     else:
         sales_generated_mask = pd.Series(False, index=d.index)
-    # Count it against Create-date population
     ind_ref_sales = pop_mask & sales_generated_mask
 
-    # ---------- NEW: Aggregate toggle (All Academic Counsellors) ----------
+    # ---------- Aggregate toggle (All Academic Counsellors) ----------
     st.markdown("#### Display mode")
     show_all_ac = st.checkbox("Aggregate all Academic Counsellors (show totals only)", value=False, key="ac_all_toggle")
 
-    # ---- Build AC-wise table (or aggregated)
+    # ---- AC-wise table
     col_label_ref = "Referral Intent Source = Sales Generated — Count"
 
     base_sub = pd.DataFrame({
@@ -3309,7 +3307,7 @@ elif view == "AC Wise Detail":
         key="ac_dl_counts"
     )
 
-    # ---- % Conversion between two chosen metrics (per AC or totals)
+    # ---- % Conversion between two chosen metrics
     st.markdown("### Conversion % between two metrics")
     metric_labels = [
         "Create Date — Count",
@@ -3342,7 +3340,7 @@ elif view == "AC Wise Detail":
         key="ac_dl_pct"
     )
 
-    # Overall KPI from the table in view (works for both modes)
+    # Overall KPI
     den_sum = int(pct_tbl[denom_label].sum())
     num_sum = int(pct_tbl[numer_label].sum())
     overall_pct = (num_sum / den_sum * 100.0) if den_sum > 0 else 0.0
@@ -3353,209 +3351,7 @@ elif view == "AC Wise Detail":
         unsafe_allow_html=True
     )
 
-    # =========================
-    # Stacked charts (Payments, Created, Conversion%)
-    # =========================
-    st.markdown("### Stacked charts — by Deal Source")
-
-    # Prepare Deal Source dim (safe)
-    if source_col and source_col in d.columns:
-        d["_deal_source_safe"] = d[source_col].fillna("Unknown").astype(str)
-    else:
-        d["_deal_source_safe"] = "Unknown"
-
-    # AC filter, Source filter, Country filter for charts/breakdowns
-    st.markdown("#### Optional filters for stacked charts / breakdowns")
-    ac_options = sorted(d["_ac"].unique().tolist())
-    pick_acs = st.multiselect("Academic Counsellor", ["All"] + ac_options, default=["All"], key="ac_pick_filter")
-    if "All" not in pick_acs:
-        d = d[d["_ac"].isin(pick_acs)].copy()
-
-    if source_col and source_col in d.columns:
-        src_options = sorted(d["_deal_source_safe"].unique().tolist())
-        pick_srcs = st.multiselect("JetLearn Deal Source", ["All"] + src_options, default=["All"], key="ac_src_pick")
-        if "All" not in pick_srcs:
-            d = d[d["_deal_source_safe"].isin(pick_srcs)].copy()
-    else:
-        st.caption("Deal Source column missing — using 'Unknown' for stacks.")
-
-    if country_col and country_col in d.columns:
-        d["_country_safe"] = d[country_col].fillna("Unknown").astype(str)
-        cty_options = sorted(d["_country_safe"].unique().tolist())
-        pick_cty = st.multiselect("Country", ["All"] + cty_options, default=["All"], key="ac_cty_pick")
-        if "All" not in pick_cty:
-            d = d[d["_country_safe"].isin(pick_cty)].copy()
-    else:
-        d["_country_safe"] = "Unknown"
-
-    # Recompute indicators after local filtering (indices align)
-    d_base = pd.DataFrame(index=d.index)
-    d_base["Academic Counsellor"] = d["_ac"]
-    d_base["Deal Source"] = d["_deal_source_safe"]
-
-    # Indicators with current mode & scope already computed (ind_create, ind_paid)
-    d_base["CreatedInd"] = ind_create.loc[d.index].astype(int) if len(ind_create) == len(df_f) else ind_create.astype(int)
-    d_base["PaidInd"]    = ind_paid.loc[d.index].astype(int)    if len(ind_paid)    == len(df_f) else ind_paid.astype(int)
-
-    # Grouped frames for stacking
-    g_pay = (
-        d_base.loc[d_base["PaidInd"] == 1]
-              .groupby(["Academic Counsellor", "Deal Source"]).size()
-              .rename("Count").reset_index()
-    )
-    g_create = (
-        d_base.loc[d_base["CreatedInd"] == 1]
-              .groupby(["Academic Counsellor", "Deal Source"]).size()
-              .rename("Count").reset_index()
-    )
-
-    # Ensure all ACs present (even if zero) based on current filtered population
-    ac_order = sorted(d["_ac"].unique().tolist())
-    def ensure_all_ac(df_in):
-        if not ac_order:
-            return df_in
-        # cross with AC list to keep ordering
-        all_rows = pd.MultiIndex.from_product([ac_order, df_in["Deal Source"].unique() if not df_in.empty else ["Unknown"]],
-                                              names=["Academic Counsellor", "Deal Source"]).to_frame(index=False)
-        merged = all_rows.merge(df_in, on=["Academic Counsellor", "Deal Source"], how="left").fillna({"Count": 0})
-        return merged
-
-    g_pay_c = ensure_all_ac(g_pay)
-    g_create_c = ensure_all_ac(g_create)
-
-    # toggle to show % within each AC stack (for Payments / Created)
-    normalize_pct = st.checkbox("Normalize stacks to % within each AC (Payments & Created)", value=False, key="ac_norm_pct")
-
-    def stacked_chart(df_in, title, use_pct=False):
-        if df_in.empty:
-            return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_bar()
-        df = df_in.copy()
-        # Normalize within AC if requested
-        if use_pct:
-            tot = df.groupby("Academic Counsellor")["Count"].transform("sum").replace({0: np.nan})
-            df["Value"] = np.where(tot.notna(), df["Count"] / tot * 100.0, 0.0)
-            y_enc = alt.Y("Value:Q", title="%", scale=alt.Scale(domain=[0, 100]), stack=True)
-        else:
-            df["Value"] = df["Count"]
-            y_enc = alt.Y("Value:Q", title="Count", stack=True)
-        # keep order
-        df["Academic Counsellor"] = pd.Categorical(df["Academic Counsellor"], categories=ac_order, ordered=True)
-
-        return (
-            alt.Chart(df)
-            .mark_bar(opacity=0.9)
-            .encode(
-                x=alt.X("Academic Counsellor:N", sort=ac_order, title="Academic Counsellor"),
-                y=y_enc,
-                color=alt.Color("Deal Source:N", legend=alt.Legend(orient="bottom", title="Deal Source")),
-                tooltip=[
-                    alt.Tooltip("Academic Counsellor:N"),
-                    alt.Tooltip("Deal Source:N"),
-                    alt.Tooltip("Count:Q"),
-                    alt.Tooltip("Value:Q", title="Shown value", format=".1f" if use_pct else ","),
-                ],
-            )
-            .properties(height=360, title=title)
-        )
-
-    # ---- Conversion% stacked (Paid / Created) — contribution-based so stacks sum to AC total (works for MTD & Cohort)
-    g_merge = (
-        g_create.rename(columns={"Count": "Created"})
-                .merge(g_pay.rename(columns={"Count": "Paid"}),
-                       on=["Academic Counsellor", "Deal Source"], how="outer")
-                .fillna({"Created": 0, "Paid": 0})
-    )
-
-    if ac_order:
-        g_merge = g_merge[g_merge["Academic Counsellor"].isin(ac_order)].copy()
-        g_merge["Academic Counsellor"] = pd.Categorical(
-            g_merge["Academic Counsellor"], categories=ac_order, ordered=True
-        )
-
-    # Per-source raw conversion (for tooltip)
-    g_merge["ConvPct_Source"] = np.where(
-        g_merge["Created"] > 0, g_merge["Paid"] / g_merge["Created"] * 100.0, 0.0
-    )
-
-    # Contribution to AC-level conversion:
-    # stack metric = (Paid_source / Created_total_of_AC) * 100
-    created_total_ac = g_merge.groupby("Academic Counsellor")["Created"].transform("sum")
-    paid_total_ac    = g_merge.groupby("Academic Counsellor")["Paid"].transform("sum")
-    g_merge["ConvPct_AC_Total"] = np.where(
-        created_total_ac > 0, paid_total_ac / created_total_ac * 100.0, 0.0
-    )
-    g_merge["ConvPct_Stack"] = np.where(
-        created_total_ac > 0, g_merge["Paid"] / created_total_ac * 100.0, 0.0
-    )
-
-    def conversion_chart_contribution(g):
-        if g.empty:
-            return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_bar()
-
-        tooltips = [
-            alt.Tooltip("Academic Counsellor:N"),
-            alt.Tooltip("Deal Source:N"),
-            alt.Tooltip("Created:Q"),
-            alt.Tooltip("Paid:Q"),
-            alt.Tooltip("ConvPct_Source:Q", title="Source Conv% (Paid/Created)", format=".1f"),
-            alt.Tooltip("ConvPct_AC_Total:Q", title="AC Total Conv%", format=".1f"),
-            alt.Tooltip("ConvPct_Stack:Q", title="Stack Contribution %", format=".1f"),
-        ]
-        return (
-            alt.Chart(g)
-            .mark_bar(opacity=0.9)
-            .encode(
-                x=alt.X("Academic Counsellor:N", sort=ac_order, title="Academic Counsellor"),
-                y=alt.Y(
-                    "ConvPct_Stack:Q",
-                    title="Conversion % (Paid / Created) — stacked by source",
-                    scale=alt.Scale(domain=[0, 100]),
-                    stack=True
-                ),
-                color=alt.Color("Deal Source:N", legend=alt.Legend(orient="bottom", title="Deal Source")),
-                tooltip=tooltips,
-            )
-            .properties(height=360, title=f"Conversion % — stacked by Deal Source (contribution to AC total) • {mode}")
-        )
-
-    col_pay, col_create, col_conv = st.columns(3)
-    with col_pay:
-        st.altair_chart(
-            stacked_chart(g_pay_c, "Payments (Payment Received — stacked by Deal Source)", use_pct=normalize_pct),
-            use_container_width=True
-        )
-    with col_create:
-        st.altair_chart(
-            stacked_chart(g_create_c, "Deals Created (Create Date — stacked by Deal Source)", use_pct=normalize_pct),
-            use_container_width=True
-        )
-    with col_conv:
-        st.altair_chart(conversion_chart_contribution(g_merge), use_container_width=True)
-
-    with st.expander("Download data used in stacked charts"):
-        st.download_button(
-            "Download CSV — Payments by AC × Deal Source",
-            data=g_pay_c.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
-            file_name="ac_by_dealsource_payments.csv",
-            mime="text/csv",
-            key="ac_stack_dl_pay"
-        )
-        st.download_button(
-            "Download CSV — Deals Created by AC × Deal Source",
-            data=g_create_c.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
-            file_name="ac_by_dealsource_created.csv",
-            mime="text/csv",
-            key="ac_stack_dl_created"
-        )
-        st.download_button(
-            "Download CSV — Conversion% by AC × Deal Source (source + contribution)",
-            data=g_merge.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
-            file_name="ac_by_dealsource_conversion_pct_contribution.csv",
-            mime="text/csv",
-            key="ac_stack_dl_conv"
-        )
-
-    # ---- Breakdown: AC × (Deal Source or Country) or Totals × (…)
+    # ---- Breakdown: AC × (Deal Source or Country)
     st.markdown("### Breakdown")
     grp_mode = st.radio("Group by", ["JetLearn Deal Source", "Country"], index=0, horizontal=True, key="ac_grp_mode")
 
@@ -3564,25 +3360,25 @@ elif view == "AC Wise Detail":
         if not source_col or source_col not in d.columns:
             st.info("Deal Source column not found.")
         else:
-            d["_grp"] = d["_deal_source_safe"]
+            d["_grp"] = d[source_col].fillna("Unknown").astype(str)
             have_grp = True
     else:
         if not country_col or country_col not in d.columns:
             st.info("Country column not found.")
         else:
-            d["_grp"] = d["_country_safe"]
+            d["_grp"] = d[country_col].fillna("Unknown").astype(str)
             have_grp = True
 
     if have_grp:
         sub2 = pd.DataFrame({
             "Academic Counsellor": d["_ac"],
             "_grp": d["_grp"],
-            "Create Date — Count": ind_create.loc[d.index].astype(int) if len(ind_create) == len(df_f) else ind_create.astype(int),
-            "First Cal — Count":   ind_first.loc[d.index].astype(int)  if len(ind_first)  == len(df_f) else ind_first.astype(int),
-            "Cal Rescheduled — Count": ind_resch.loc[d.index].astype(int) if len(ind_resch) == len(df_f) else ind_resch.astype(int),
-            "Cal Done — Count":    ind_done.loc[d.index].astype(int)   if len(ind_done)   == len(df_f) else ind_done.astype(int),
-            "Payment Received — Count": ind_paid.loc[d.index].astype(int) if len(ind_paid) == len(df_f) else ind_paid.astype(int),
-            col_label_ref:         ind_ref_sales.loc[d.index].astype(int) if len(ind_ref_sales) == len(df_f) else ind_ref_sales.astype(int),
+            "Create Date — Count": ind_create.astype(int),
+            "First Cal — Count": ind_first.astype(int),
+            "Cal Rescheduled — Count": ind_resch.astype(int),
+            "Cal Done — Count": ind_done.astype(int),
+            "Payment Received — Count": ind_paid.astype(int),
+            col_label_ref:           ind_ref_sales.astype(int),
         })
 
         if show_all_ac:
@@ -3609,3 +3405,177 @@ elif view == "AC Wise Detail":
             mime="text/csv",
             key="ac_dl_breakdown"
         )
+
+    # ==== AC × Deal Source — Stacked charts (Payments, Deals Created, and Conversion%) ====
+    st.markdown("### AC × Deal Source — Stacked charts (Payments, Deals Created & Conversion %)")
+
+    if (not source_col) or (source_col not in d.columns):
+        st.info("Deal Source column not found — cannot draw stacked charts.")
+    else:
+        _idx = d.index
+        ac_series  = (pd.Series("All ACs (Total)", index=_idx) if show_all_ac else d["_ac"])
+        src_series = d[source_col].fillna("Unknown").astype(str)
+
+        ind_paid_series   = pd.Series(ind_paid, index=_idx).astype(bool)
+        ind_create_series = pd.Series(ind_create, index=_idx).astype(bool)
+
+        # Payments stacked
+        df_pay = pd.DataFrame({
+            "Academic Counsellor": ac_series,
+            "Deal Source": src_series,
+            "Count": ind_paid_series.astype(int)
+        })
+        g_pay = df_pay.groupby(["Academic Counsellor", "Deal Source"], as_index=False)["Count"].sum()
+        totals_pay = g_pay.groupby("Academic Counsellor", as_index=False)["Count"].sum().rename(columns={"Count": "Total"})
+
+        # Deals Created stacked
+        df_create = pd.DataFrame({
+            "Academic Counsellor": ac_series,
+            "Deal Source": src_series,
+            "Count": ind_create_series.astype(int)
+        })
+        g_create = df_create.groupby(["Academic Counsellor", "Deal Source"], as_index=False)["Count"].sum()
+        totals_create = g_create.groupby("Academic Counsellor", as_index=False)["Count"].sum().rename(columns={"Count": "Total"})
+
+        # Options
+        col_opt1, col_opt2, col_opt3 = st.columns([1, 1, 1])
+        with col_opt1:
+            normalize_pct = st.checkbox("Show Payments/Created as % of AC total (for the first two charts)", value=False, key="ac_stack_pct")
+        with col_opt2:
+            sort_mode = st.selectbox(
+                "Sort ACs by",
+                ["Payments (desc)", "Deals Created (desc)", "A–Z"],
+                index=0, key="ac_stack_sort"
+            )
+        with col_opt3:
+            top_n = st.number_input("Max ACs to show", min_value=1, max_value=500, value=30, step=1, key="ac_stack_topn")
+
+        if sort_mode == "Payments (desc)":
+            order_src = totals_pay.copy().sort_values("Total", ascending=False)
+        elif sort_mode == "Deals Created (desc)":
+            order_src = totals_create.copy().sort_values("Total", ascending=False)
+        else:
+            base_totals = totals_pay if not totals_pay.empty else totals_create
+            order_src = base_totals.copy().sort_values("Academic Counsellor", ascending=True)
+
+        ac_order = order_src["Academic Counsellor"].head(int(top_n)).tolist() if not order_src.empty else []
+
+        def prep_for_chart(g_df, totals_df):
+            g = g_df.merge(totals_df, on="Academic Counsellor", how="left")
+            if ac_order:
+                g = g[g["Academic Counsellor"].isin(ac_order)].copy()
+                g["Academic Counsellor"] = pd.Categorical(g["Academic Counsellor"], categories=ac_order, ordered=True)
+            else:
+                g["Academic Counsellor"] = g["Academic Counsellor"].astype(str)
+            if normalize_pct:
+                g["Pct"] = np.where(g["Total"] > 0, g["Count"] / g["Total"] * 100.0, 0.0)
+            return g
+
+        g_pay_c    = prep_for_chart(g_pay, totals_pay)
+        g_create_c = prep_for_chart(g_create, totals_create)
+
+        def stacked_chart(g, title, use_pct):
+            if g.empty:
+                return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_bar()
+
+            y_field = alt.Y(
+                ("Pct:Q" if use_pct else "Count:Q"),
+                title=("% of AC total" if use_pct else "Count"),
+                stack=True,
+                scale=(alt.Scale(domain=[0, 100]) if use_pct else alt.Undefined)
+            )
+            tooltips = [
+                alt.Tooltip("Academic Counsellor:N"),
+                alt.Tooltip("Deal Source:N"),
+                alt.Tooltip("Count:Q", title="Count"),
+                alt.Tooltip("Total:Q", title="AC Total"),
+            ]
+            if use_pct:
+                tooltips.append(alt.Tooltip("Pct:Q", title="% of AC", format=".1f"))
+
+            chart = (
+                alt.Chart(g)
+                .mark_bar(opacity=0.9)
+                .encode(
+                    x=alt.X("Academic Counsellor:N", sort=ac_order, title="Academic Counsellor"),
+                    y=y_field,
+                    color=alt.Color("Deal Source:N", legend=alt.Legend(orient="bottom", title="Deal Source")),
+                    tooltip=tooltips,
+                )
+                .properties(height=360, title=title)
+            )
+            return chart
+
+        # ---- NEW: Conversion% stacked (Payments / Created within AC × Source)
+        g_merge = (
+            g_create.rename(columns={"Count": "Created"})
+                    .merge(g_pay.rename(columns={"Count": "Paid"}),
+                           on=["Academic Counsellor", "Deal Source"], how="outer")
+                    .fillna({"Created": 0, "Paid": 0})
+        )
+        # keep AC order and top_n selection
+        if ac_order:
+            g_merge = g_merge[g_merge["Academic Counsellor"].isin(ac_order)].copy()
+            g_merge["Academic Counsellor"] = pd.Categorical(g_merge["Academic Counsellor"], categories=ac_order, ordered=True)
+
+        g_merge["ConvPct"] = np.where(g_merge["Created"] > 0, g_merge["Paid"] / g_merge["Created"] * 100.0, 0.0)
+
+        def conversion_chart(g):
+            if g.empty:
+                return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_bar()
+            tooltips = [
+                alt.Tooltip("Academic Counsellor:N"),
+                alt.Tooltip("Deal Source:N"),
+                alt.Tooltip("Created:Q"),
+                alt.Tooltip("Paid:Q"),
+                alt.Tooltip("ConvPct:Q", title="Conversion %", format=".1f"),
+            ]
+            return (
+                alt.Chart(g)
+                .mark_bar(opacity=0.9)
+                .encode(
+                    x=alt.X("Academic Counsellor:N", sort=ac_order, title="Academic Counsellor"),
+                    y=alt.Y("ConvPct:Q", title="Conversion % (Paid / Created)", scale=alt.Scale(domain=[0, 100]), stack=True),
+                    color=alt.Color("Deal Source:N", legend=alt.Legend(orient="bottom", title="Deal Source")),
+                    tooltip=tooltips,
+                )
+                .properties(height=360, title="Conversion % — stacked by Deal Source")
+            )
+
+        col_pay, col_create, col_conv = st.columns(3)
+        with col_pay:
+            st.altair_chart(
+                stacked_chart(g_pay_c, "Payments (Payment Received — stacked by Deal Source)", use_pct=normalize_pct),
+                use_container_width=True
+            )
+        with col_create:
+            st.altair_chart(
+                stacked_chart(g_create_c, "Deals Created (Create Date — stacked by Deal Source)", use_pct=normalize_pct),
+                use_container_width=True
+            )
+        with col_conv:
+            st.altair_chart(conversion_chart(g_merge), use_container_width=True)
+
+        with st.expander("Download data used in stacked charts"):
+            st.download_button(
+                "Download CSV — Payments by AC × Deal Source",
+                data=g_pay_c.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
+                file_name="ac_by_dealsource_payments.csv",
+                mime="text/csv",
+                key="ac_stack_dl_pay"
+            )
+            st.download_button(
+                "Download CSV — Deals Created by AC × Deal Source",
+                data=g_create_c.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
+                file_name="ac_by_dealsource_created.csv",
+                mime="text/csv",
+                key="ac_stack_dl_created"
+            )
+            st.download_button(
+                "Download CSV — Conversion% by AC × Deal Source",
+                data=g_merge.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
+                file_name="ac_by_dealsource_conversion_pct.csv",
+                mime="text/csv",
+                key="ac_stack_dl_conv"
+            )
+
