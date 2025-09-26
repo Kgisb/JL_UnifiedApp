@@ -3079,14 +3079,13 @@ elif view == "AC Wise Detail":
     st.subheader("AC Wise Detail – Create-date scoped counts & % conversions")
 
     # ---- Column mappings
-    # We will look specifically for "Referral Intent Source".
     referral_intent_col = find_col(df, ["Referral Intent Source", "Referral intent source"])
 
     if not create_col or not counsellor_col:
         st.error("Missing required columns (Create Date and Academic Counsellor).")
         st.stop()
 
-    # ---- Date scope (population by Create Date) & Counting mode
+    # ---- Date scope (based on Create Date) & Counting mode
     st.markdown("**Date scope (based on Create Date) & Counting mode**")
     c1, c2 = st.columns(2)
     scope_pick = st.radio(
@@ -3114,7 +3113,7 @@ elif view == "AC Wise Detail":
     mode = st.radio("Counting mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ac_mode")
     st.caption(f"Create-date scope: **{scope_start} → {scope_end}** • Mode: **{mode}**")
 
-    # ---- Start from globally filtered df_f, then optional Deal Stage filter
+    # ---- Start from globally filtered data; optional Deal Stage filter on the population
     d = df_f.copy()
 
     if dealstage_col and dealstage_col in d.columns:
@@ -3162,22 +3161,19 @@ elif view == "AC Wise Detail":
         ind_done   = m_done
         ind_paid   = m_paid
 
-    # ---------- Referral Intent Source = "Sales Generated" only ----------
-    # Count only rows where Referral Intent Source exactly equals "Sales Generated" (case-insensitive, whitespace-safe).
+    # Referral Intent Source = "Sales Generated" only (case-insensitive)
     if referral_intent_col and referral_intent_col in d.columns:
         _ref = d[referral_intent_col].astype(str).str.strip().str.lower()
         sales_generated_mask = (_ref == "sales generated")
     else:
         sales_generated_mask = pd.Series(False, index=d.index)
-
-    # Count it against Create-date population (same behavior as earlier request)
     ind_ref_sales = pop_mask & sales_generated_mask
 
     # ---------- NEW: Aggregate toggle (All Academic Counsellors) ----------
     st.markdown("#### Display mode")
     show_all_ac = st.checkbox("Aggregate all Academic Counsellors (show totals only)", value=False, key="ac_all_toggle")
 
-    # ---- Build AC-wise table (or aggregated)
+    # ---- AC-wise counts table (or aggregated)
     col_label_ref = "Referral Intent Source = Sales Generated — Count"
 
     base_sub = pd.DataFrame({
@@ -3258,34 +3254,65 @@ elif view == "AC Wise Detail":
         unsafe_allow_html=True
     )
 
-    # ---- Breakdown: AC × (Deal Source or Country) or Totals × (…)
+    # ---- Breakdown (with multi-select filters for AC, Deal Source, Country)
     st.markdown("### Breakdown")
+
+    # Prepare group labels first for choices
     grp_mode = st.radio("Group by", ["JetLearn Deal Source", "Country"], index=0, horizontal=True, key="ac_grp_mode")
 
-    have_grp = False
-    if grp_mode == "JetLearn Deal Source":
-        if not source_col or source_col not in d.columns:
-            st.info("Deal Source column not found.")
-        else:
-            d["_grp"] = d[source_col].fillna("Unknown").astype(str)
-            have_grp = True
-    else:
-        if not country_col or country_col not in d.columns:
-            st.info("Country column not found.")
-        else:
-            d["_grp"] = d[country_col].fillna("Unknown").astype(str)
-            have_grp = True
+    # Build choice lists (from current filtered population d)
+    ac_choices = sorted(d["_ac"].unique().tolist())
+    ac_pick = st.multiselect("Filter by Academic Counsellor (optional)", ["All"] + ac_choices, default=["All"], key="ac_brk_ac")
 
-    if have_grp:
+    if source_col and source_col in d.columns:
+        src_choices = sorted(d[source_col].fillna("Unknown").astype(str).unique().tolist())
+        src_pick = st.multiselect("Filter by JetLearn Deal Source (optional)", ["All"] + src_choices, default=["All"], key="ac_brk_src")
+    else:
+        src_choices, src_pick = [], ["All"]
+        st.caption("Deal Source column not found; source filter disabled.")
+
+    if country_col and country_col in d.columns:
+        cty_choices = sorted(d[country_col].fillna("Unknown").astype(str).unique().tolist())
+        cty_pick = st.multiselect("Filter by Country (optional)", ["All"] + cty_choices, default=["All"], key="ac_brk_cty")
+    else:
+        cty_choices, cty_pick = [], ["All"]
+        st.caption("Country column not found; country filter disabled.")
+
+    # Build grouping column on a copy, then apply filters specific to breakdown
+    d_br = d.copy()
+
+    if grp_mode == "JetLearn Deal Source":
+        if not source_col or source_col not in d_br.columns:
+            st.info("Deal Source column not found.")
+            st.stop()
+        d_br["_grp"] = d_br[source_col].fillna("Unknown").astype(str)
+    else:
+        if not country_col or country_col not in d_br.columns:
+            st.info("Country column not found.")
+            st.stop()
+        d_br["_grp"] = d_br[country_col].fillna("Unknown").astype(str)
+
+    # Apply the three optional filters
+    if "All" not in ac_pick:
+        d_br = d_br[d_br["_ac"].isin(ac_pick)]
+    if src_choices and "All" not in src_pick and (source_col and source_col in d_br.columns):
+        d_br = d_br[d_br[source_col].fillna("Unknown").astype(str).isin(src_pick)]
+    if cty_choices and "All" not in cty_pick and (country_col and country_col in d_br.columns):
+        d_br = d_br[d_br[country_col].fillna("Unknown").astype(str).isin(cty_pick)]
+
+    if d_br.empty:
+        st.info("No rows after applying breakdown filters.")
+    else:
+        # Use indicator masks aligned by index
         sub2 = pd.DataFrame({
-            "Academic Counsellor": d["_ac"],
-            "_grp": d["_grp"],
-            "Create Date — Count": ind_create.astype(int),
-            "First Cal — Count": ind_first.astype(int),
-            "Cal Rescheduled — Count": ind_resch.astype(int),
-            "Cal Done — Count": ind_done.astype(int),
-            "Payment Received — Count": ind_paid.astype(int),
-            col_label_ref:           ind_ref_sales.astype(int),
+            "Academic Counsellor": d_br["_ac"],
+            "_grp": d_br["_grp"],
+            "Create Date — Count": ind_create.loc[d_br.index].astype(int),
+            "First Cal — Count": ind_first.loc[d_br.index].astype(int),
+            "Cal Rescheduled — Count": ind_resch.loc[d_br.index].astype(int),
+            "Cal Done — Count": ind_done.loc[d_br.index].astype(int),
+            "Payment Received — Count": ind_paid.loc[d_br.index].astype(int),
+            col_label_ref:           ind_ref_sales.loc[d_br.index].astype(int),
         })
 
         if show_all_ac:
