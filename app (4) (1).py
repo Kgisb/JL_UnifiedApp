@@ -2310,7 +2310,7 @@ elif view == "Dashboard":
     st.subheader("Dashboard – Key Business Snapshot")
 
     # =========================
-    # NEW: This Month Cash-in  (Google Sheet A1:E13)
+    # NEW: This Month Cash-in  (Google Sheet A2:D13)
     # =========================
     st.markdown("### This Month Cash-in")
 
@@ -2324,31 +2324,32 @@ elif view == "Dashboard":
                                  help="The long ID between /d/ and /edit in the sheet URL.")
         gid = st.text_input("GID (tab id)", GID_DEFAULT, key="dash_cashin_gid",
                             help="The number after gid= in the sheet URL.")
-        st.caption("Exactly reads range **A1:E13** from the tab via CSV export.")
+        st.caption("Exactly reads range **A2:D13** from the tab via CSV export.")
 
     @st.cache_data(show_spinner=False)
-    def _load_gsheet_a1_e13(sheet_id: str, gid: str) -> pd.DataFrame:
+    def _load_gsheet_a2_d13(sheet_id: str, gid: str) -> pd.DataFrame:
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
         df_all = pd.read_csv(url)
-        # Take exactly A1:E13 (rows 0..12 and cols 0..4)
-        df = df_all.iloc[0:13, 0:5].copy()
+        # Take exactly A2:D13 (rows 2..13 → iloc 1:13, cols A..D → iloc 0:4)
+        df = df_all.iloc[1:13, 0:4].copy()
         # Soft-coerce numeric-looking strings (keep text as-is)
         for c in df.columns:
-            # remove commas for thousands, keep % as text
             s = df[c].astype(str)
-            if s.str.fullmatch(r"[\d,\.]+").fillna(False).any():
+            # remove commas for thousands; leave percentages/text alone
+            numeric_like = s.str.fullmatch(r"[\d,\.]+").fillna(False)
+            if numeric_like.any():
                 df[c] = pd.to_numeric(s.str.replace(",", ""), errors="ignore")
         return df
 
     try:
-        df_cash = _load_gsheet_a1_e13(sheet_id, gid)
+        df_cash = _load_gsheet_a2_d13(sheet_id, gid)
         st.dataframe(df_cash, use_container_width=True)
 
         with st.expander("Download & quick summary", expanded=False):
             st.download_button(
-                "Download CSV — This Month Cash-in (A1:E13)",
+                "Download CSV — This Month Cash-in (A2:D13)",
                 data=df_cash.to_csv(index=False).encode("utf-8"),
-                file_name="this_month_cash_in_A1_E13.csv",
+                file_name="this_month_cash_in_A2_D13.csv",
                 mime="text/csv",
                 key="dash_cashin_dl",
             )
@@ -2363,7 +2364,7 @@ elif view == "Dashboard":
                 st.dataframe(summary, use_container_width=True)
     except Exception as e:
         st.warning(
-            "Could not load the Google Sheet range A1:E13. "
+            "Could not load the Google Sheet range A2:D13. "
             "Confirm the Sheet ID, GID, and that the sheet is shared publicly (Anyone with the link → Viewer)."
         )
         st.exception(e)
