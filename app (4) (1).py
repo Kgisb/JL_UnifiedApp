@@ -1052,34 +1052,18 @@ elif view == "Trend & Analysis":
 
     # Group-by fields
     available_groups, group_map = [], {}
-    if counsellor_col:
-        available_groups.append("Academic Counsellor")
-        group_map["Academic Counsellor"] = counsellor_col
-    if country_col:
-        available_groups.append("Country")
-        group_map["Country"] = country_col
-    if source_col:
-        available_groups.append("JetLearn Deal Source")
-        group_map["JetLearn Deal Source"] = source_col
+    if counsellor_col: available_groups.append("Academic Counsellor"); group_map["Academic Counsellor"] = counsellor_col
+    if country_col:    available_groups.append("Country");            group_map["Country"] = country_col
+    if source_col:     available_groups.append("JetLearn Deal Source"); group_map["JetLearn Deal Source"] = source_col
 
-    sel_group_labels = st.multiselect(
-        "Group by (pick one or more)",
-        options=available_groups,
-        default=available_groups[:1] if available_groups else []
-    )
+    sel_group_labels = st.multiselect("Group by (pick one or more)", options=available_groups, default=available_groups[:1] if available_groups else [])
     group_cols = [group_map[l] for l in sel_group_labels if l in group_map]
 
     # Mode
     level = st.radio("Mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ta_mode")
 
     # Date scope
-    date_mode = st.radio(
-        "Date scope",
-        ["This month", "Last month", "Custom date range"],
-        index=0,
-        horizontal=True,
-        key="ta_dscope"
-    )
+    date_mode = st.radio("Date scope", ["This month", "Last month", "Custom date range"], index=0, horizontal=True, key="ta_dscope")
     if date_mode == "This month":
         range_start, range_end = month_bounds(today)
         st.caption(f"Scope: **This month** ({range_start} → {range_end})")
@@ -1088,10 +1072,8 @@ elif view == "Trend & Analysis":
         st.caption(f"Scope: **Last month** ({range_start} → {range_end})")
     else:
         col_d1, col_d2 = st.columns(2)
-        with col_d1:
-            range_start = st.date_input("Start date", value=today.replace(day=1), key="ta_custom_start")
-        with col_d2:
-            range_end = st.date_input("End date", value=month_bounds(today)[1], key="ta_custom_end")
+        with col_d1: range_start = st.date_input("Start date", value=today.replace(day=1), key="ta_custom_start")
+        with col_d2: range_end   = st.date_input("End date", value=month_bounds(today)[1], key="ta_custom_end")
         if range_end < range_start:
             st.error("End date cannot be before start date.")
             st.stop()
@@ -1106,12 +1088,7 @@ elif view == "Trend & Analysis":
         "Create Date (deals) — Count",
         "Future Calibration Scheduled — Count",
     ]
-    metrics_selected = st.multiselect(
-        "Metrics to show",
-        options=all_metrics,
-        default=all_metrics,
-        key="ta_metrics"
-    )
+    metrics_selected = st.multiselect("Metrics to show", options=all_metrics, default=all_metrics, key="ta_metrics")
 
     metric_cols = {
         "Payment Received Date — Count": pay_col,
@@ -1181,14 +1158,7 @@ elif view == "Trend & Analysis":
             if disp == "Create Date (deals) — Count":
                 idx = pop_mask_mtd if mode == "MTD" else create_dt.between(range_start, range_end)
                 gdf = df_work.loc[idx, group_cols_local].copy()
-                agg = (
-                    gdf.assign(_one=1)
-                       .groupby(group_cols_local)["_one"].sum()
-                       .reset_index()
-                       .rename(columns={"_one": disp})
-                    if not gdf.empty else
-                    pd.DataFrame(columns=group_cols_local + [disp])
-                )
+                agg = gdf.assign(_one=1).groupby(group_cols_local)["_one"].sum().reset_index().rename(columns={"_one": disp}) if not gdf.empty else pd.DataFrame(columns=group_cols_local+[disp])
                 outs.append(agg)
                 continue
 
@@ -1196,40 +1166,20 @@ elif view == "Trend & Analysis":
                 if eff_cal_date is None:
                     base_idx = pop_mask_mtd if mode == "MTD" else slice(None)
                     target = df_work.loc[base_idx, group_cols_local] if mode == "MTD" else df_work[group_cols_local]
-                    agg = (
-                        target.assign(**{disp: 0})
-                              .groupby(group_cols_local)[disp].sum()
-                              .reset_index()
-                        if not target.empty else
-                        pd.DataFrame(columns=group_cols_local + [disp])
-                    )
+                    agg = target.assign(**{disp:0}).groupby(group_cols_local)[disp].sum().reset_index() if not target.empty else pd.DataFrame(columns=group_cols_local+[disp])
                     outs.append(agg)
                     continue
-
                 future_mask = eff_cal_date > range_end
                 idx = (pop_mask_mtd & future_mask) if mode == "MTD" else future_mask
                 gdf = df_work.loc[idx, group_cols_local].copy()
-                agg = (
-                    gdf.assign(_one=1)
-                       .groupby(group_cols_local)["_one"].sum()
-                       .reset_index()
-                       .rename(columns={"_one": disp})
-                    if not gdf.empty else
-                    pd.DataFrame(columns=group_cols_local + [disp])
-                )
+                agg = gdf.assign(_one=1).groupby(group_cols_local)["_one"].sum().reset_index().rename(columns={"_one": disp}) if not gdf.empty else pd.DataFrame(columns=group_cols_local+[disp])
                 outs.append(agg)
                 continue
 
             if (not col) or (col not in df_work.columns):
                 base_idx = pop_mask_mtd if mode == "MTD" else slice(None)
                 target = df_work.loc[base_idx, group_cols_local] if mode == "MTD" else df_work[group_cols_local]
-                agg = (
-                    target.assign(**{disp: 0})
-                          .groupby(group_cols_local)[disp].sum()
-                          .reset_index()
-                    if not target.empty else
-                    pd.DataFrame(columns=group_cols_local + [disp])
-                )
+                agg = target.assign(**{disp:0}).groupby(group_cols_local)[disp].sum().reset_index() if not target.empty else pd.DataFrame(columns=group_cols_local+[disp])
                 outs.append(agg)
                 continue
 
@@ -1242,14 +1192,7 @@ elif view == "Trend & Analysis":
                 idx = ev_in_range
 
             gdf = df_work.loc[idx, group_cols_local].copy()
-            agg = (
-                gdf.assign(_one=1)
-                   .groupby(group_cols_local)["_one"].sum()
-                   .reset_index()
-                   .rename(columns={"_one": disp})
-                if not gdf.empty else
-                pd.DataFrame(columns=group_cols_local + [disp])
-            )
+            agg = gdf.assign(_one=1).groupby(group_cols_local)["_one"].sum().reset_index().rename(columns={"_one": disp}) if not gdf.empty else pd.DataFrame(columns=group_cols_local+[disp])
             outs.append(agg)
 
         if outs:
@@ -1289,12 +1232,113 @@ elif view == "Trend & Analysis":
         st.dataframe(show, use_container_width=True)
 
         csv = show.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download CSV (Trend & Analysis)",
-            data=csv,
-            file_name="trend_analysis_final.csv",
-            mime="text/csv"
-        )
+        st.download_button("Download CSV (Trend & Analysis)", data=csv, file_name="trend_analysis_final.csv", mime="text/csv")
+
+    # ---------------------------------------------------------------------
+    # NEW: Payment-month vs Create-month lag mix (M0, M-1, M-2, …)
+    # ---------------------------------------------------------------------
+    st.markdown("### Payment month mix by Create-month lag (M0 / M-1 / M-2 …)")
+
+    if not pay_col or pay_col not in df_f.columns or not create_col or create_col not in df_f.columns:
+        st.info("Create/Payment columns not found — cannot compute M0/M-1 lag mix.")
+    else:
+        d_lag = df_f.copy()
+        d_lag["_pay_dt"] = coerce_datetime(d_lag[pay_col])
+        d_lag["_create_dt"] = coerce_datetime(d_lag[create_col])
+
+        # Limit to payments inside the currently selected Trend & Analysis scope
+        pay_in_scope = d_lag["_pay_dt"].dt.date.between(range_start, range_end)
+        d_lag = d_lag.loc[pay_in_scope].copy()
+
+        # If no payments in scope, bail out early
+        if d_lag.empty or d_lag["_pay_dt"].isna().all():
+            st.info("No payments in the selected scope to build the M0/M-1/M-2 mix.")
+        else:
+            # Build month periods
+            d_lag["_pay_m"] = d_lag["_pay_dt"].dt.to_period("M")
+            d_lag["_create_m"] = d_lag["_create_dt"].dt.to_period("M")
+
+            # Choose which payments month to analyze (if many months in custom scope)
+            pay_months = d_lag["_pay_m"].dropna().sort_values().unique()
+            pay_month_labels = [str(p) for p in pay_months]
+            default_idx = len(pay_month_labels) - 1 if pay_month_labels else 0
+
+            col_l1, col_l2 = st.columns([1,1])
+            with col_l1:
+                sel_pay_m_label = st.selectbox(
+                    "Select payments month (M0 reference)",
+                    options=pay_month_labels,
+                    index=default_idx,
+                    key="ta_mlag_paypick"
+                )
+            with col_l2:
+                max_back = st.selectbox(
+                    "Show lags up to …",
+                    options=[3, 6, 9, 12, 18, 24],
+                    index=2,  # default 9 months
+                    key="ta_mlag_back"
+                )
+
+            if sel_pay_m_label:
+                sel_pay_m = pd.Period(sel_pay_m_label, freq="M")
+
+                # Keep only rows for the selected payments month
+                dm = d_lag[d_lag["_pay_m"] == sel_pay_m].copy()
+                # Compute lag in months: pay_month_index - create_month_index
+                dm = dm[dm["_create_m"].notna()].copy()
+                pay_idx = (dm["_pay_m"].dt.year * 12 + dm["_pay_m"].dt.month)
+                c_idx   = (dm["_create_m"].dt.year * 12 + dm["_create_m"].dt.month)
+                dm["_lag"] = (pay_idx - c_idx).astype(int)
+
+                # Keep only plausible lags (>=0). <0 goes to "Future (data issue)" bucket.
+                dm["_lag_label"] = np.where(
+                    dm["_lag"] < 0, "Future (data issue)",
+                    "M" + dm["_lag"].apply(lambda x: f"-{x}" if x > 0 else "0")
+                )
+
+                # Ordered list of lag labels M0, M-1, ..., up to max_back
+                ordered_lags = ["M0"] + [f"M-{i}" for i in range(1, int(max_back)+1)]
+
+                # Bucket older than max_back
+                dm["_lag_cut"] = np.where(
+                    dm["_lag"] < 0, "Future (data issue)",
+                    np.where(dm["_lag"] <= int(max_back), dm["_lag_label"], f"Older than M-{int(max_back)}")
+                )
+
+                # Counts by lag
+                lag_counts = (
+                    dm["_lag_cut"].value_counts()
+                      .rename_axis("Lag").reset_index(name="Count")
+                )
+
+                # Reorder to desired order and ensure all labels appear
+                desired_order = ordered_lags + [f"Older than M-{int(max_back)}", "Future (data issue)"]
+                _ord_df = pd.DataFrame({"Lag": desired_order})
+                lag_counts = _ord_df.merge(lag_counts, on="Lag", how="left").fillna({"Count": 0}).astype({"Count": int})
+
+                # Chart
+                chart = (
+                    alt.Chart(lag_counts)
+                    .mark_bar(opacity=0.9)
+                    .encode(
+                        x=alt.X("Lag:N", sort=desired_order, title=f"Lag from Create month to Payment month ({sel_pay_m_label})"),
+                        y=alt.Y("Count:Q", title="Payments count"),
+                        tooltip=[alt.Tooltip("Lag:N"), alt.Tooltip("Count:Q")]
+                    )
+                    .properties(height=320, title=f"Payments in {sel_pay_m_label} by Create-month lag (M0 / M-1 / …)")
+                )
+                st.altair_chart(chart, use_container_width=True)
+
+                # Table + download
+                st.dataframe(lag_counts, use_container_width=True)
+                st.download_button(
+                    "Download CSV — Payment month lag mix",
+                    data=lag_counts.to_csv(index=False).encode("utf-8"),
+                    file_name=f"ta_payment_month_lag_mix_{sel_pay_m_label.replace('-', '')}.csv",
+                    mime="text/csv",
+                    key="ta_mlag_dl"
+                )
+
 
 elif view == "80-20":
     # Everything for 80-20 lives INSIDE this tab (own controls; no sidebar widgets)
