@@ -1176,6 +1176,7 @@ elif view == "Trend & Analysis":
                 outs.append(agg)
                 continue
 
+                # For missing columns -> zeros
             if (not col) or (col not in df_work.columns):
                 base_idx = pop_mask_mtd if mode == "MTD" else slice(None)
                 target = df_work.loc[base_idx, group_cols_local] if mode == "MTD" else df_work[group_cols_local]
@@ -1235,8 +1236,7 @@ elif view == "Trend & Analysis":
         st.download_button("Download CSV (Trend & Analysis)", data=csv, file_name="trend_analysis_final.csv", mime="text/csv")
 
     # ---------------------------------------------------------------------
-    # NEW: Payment-month vs Create-month lag mix (M0, M-1, M-2, …)
-    # Added: month selection filter (single or multiple months)
+    # Payment-month vs Create-month lag mix (M0, M-1, M-2, …) with month selector
     # ---------------------------------------------------------------------
     st.markdown("### Payment month mix by Create-month lag (M0 / M-1 / M-2 …)")
 
@@ -1333,6 +1333,94 @@ elif view == "Trend & Analysis":
                     mime="text/csv",
                     key="ta_mlag_dl"
                 )
+
+    # ---------------------------------------------------------------------
+    # NEW: Referral business — Created vs Converted by Referral Intent Source
+    # ---------------------------------------------------------------------
+    st.markdown("### Referral business — Created vs Converted by Referral Intent Source")
+
+    referral_intent_col = find_col(df, ["Referral Intent Source", "Referral intent source"])
+
+    if (not referral_intent_col) or (referral_intent_col not in df_f.columns):
+        st.info("Referral Intent Source column not found.")
+    elif (not create_col) or (create_col not in df_f.columns) or (not pay_col) or (pay_col not in df_f.columns):
+        st.info("Create Date or Payment Received Date not found.")
+    else:
+        d_ref = df_f.copy()
+        d_ref["_ref"] = d_ref[referral_intent_col].fillna("Unknown").astype(str).str.strip()
+
+        # Dates
+        _cdate = coerce_datetime(d_ref[create_col]).dt.date
+        _pdate = coerce_datetime(d_ref[pay_col]).dt.date
+
+        m_created = _cdate.between(range_start, range_end)
+        m_paid    = _pdate.between(range_start, range_end)
+
+        if level == "MTD":
+            # Population = created in window; Converted = created in window AND paid in window
+            created_mask   = m_created
+            converted_mask = m_created & m_paid
+        else:  # Cohort = use event windows directly
+            created_mask   = m_created
+            converted_mask = m_paid
+
+        ref_tbl = pd.DataFrame({
+            "Referral Intent Source": d_ref["_ref"],
+            "Created":  created_mask.astype(int),
+            "Converted": converted_mask.astype(int),
+        })
+
+        grp = (ref_tbl
+               .groupby("Referral Intent Source", as_index=False)
+               .sum(numeric_only=True)
+               .sort_values("Created", ascending=False))
+
+        # Optional: top-N & sorting controls
+        col_r1, col_r2 = st.columns([1,1])
+        with col_r1:
+            top_k = st.number_input("Show top N Referral Intent Sources by Created", 1, 1000, min(20, len(grp)) if len(grp) > 0 else 10, step=1, key="ta_ref_topn")
+        with col_r2:
+            sort_metric = st.selectbox("Sort by", ["Created (desc)", "Converted (desc)", "A–Z"], index=0, key="ta_ref_sort")
+
+        if sort_metric == "Converted (desc)":
+            grp = grp.sort_values("Converted", ascending=False)
+        elif sort_metric == "A–Z":
+            grp = grp.sort_values("Referral Intent Source", ascending=True)
+        else:
+            grp = grp.sort_values("Created", ascending=False)
+
+        grp_show = grp.head(int(top_k)) if len(grp) > int(top_k) else grp
+
+        # Melt for side-by-side (grouped) bars
+        melt = grp_show.melt(
+            id_vars=["Referral Intent Source"],
+            value_vars=["Created", "Converted"],
+            var_name="Metric",
+            value_name="Count"
+        )
+
+        chart_ref = (
+            alt.Chart(melt)
+            .mark_bar(opacity=0.9)
+            .encode(
+                x=alt.X("Referral Intent Source:N", sort=grp_show["Referral Intent Source"].tolist(), title="Referral Intent Source"),
+                y=alt.Y("Count:Q", title="Count"),
+                color=alt.Color("Metric:N", title="", legend=alt.Legend(orient="bottom")),
+                xOffset=alt.XOffset("Metric:N"),
+                tooltip=[alt.Tooltip("Referral Intent Source:N"), alt.Tooltip("Metric:N"), alt.Tooltip("Count:Q")]
+            )
+            .properties(height=360, title=f"Created vs Converted by Referral Intent Source ({level})")
+        )
+        st.altair_chart(chart_ref, use_container_width=True)
+
+        st.dataframe(grp_show, use_container_width=True)
+        st.download_button(
+            "Download CSV — Referral business (Created vs Converted)",
+            data=grp_show.to_csv(index=False).encode("utf-8"),
+            file_name=f"trend_referral_business_{level.lower()}_{range_start}_{range_end}.csv",
+            mime="text/csv",
+            key="ta_ref_business_dl"
+        )
 
 
 elif view == "80-20":
