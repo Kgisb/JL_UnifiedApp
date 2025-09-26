@@ -2743,435 +2743,229 @@ elif view == "Daily business":
 # ["MIS", "Predictibility", "Trend & Analysis", "80-20", "Stuck deals", "Lead Movement"]
 
 elif view == "Lead Movement":
-    st.subheader("Lead Movement – Inactivity since last touch")
+    st.subheader("Lead Movement — inactivity by Last Connected / Lead Activity (Create-date scoped)")
 
-    # ---- Map columns (once per run)
+    # ---- Column mapping
     lead_activity_col = find_col(df, [
-        "Lead Activity Date","Lead activity date","Last Activity Date",
-        "Last activity date","Lead Last Activity Date","Last Activity"
+        "Lead Activity Date", "Lead activity date", "Last Activity Date", "Last Activity"
     ])
     last_connected_col = find_col(df, [
-        "Last Connected","Last connected","Last Contacted","Last contacted","Last Connect"
+        "Last Connected", "Last connected", "Last Contacted", "Last Contacted Date"
     ])
 
     if not create_col:
-        st.error("Create Date column not found — this tab scopes by Create Date.")
+        st.error("Create Date column not found — this tab scopes the population by Create Date.")
         st.stop()
 
-    # ---- Deal Stage filter (optional)
-    if dealstage_col and dealstage_col in df_f.columns:
-        ds_vals = ["All"] + sorted(df_f[dealstage_col].dropna().astype(str).unique().tolist())
-        sel_ds = st.multiselect("Filter: Deal Stage", options=ds_vals, default=["All"], key="lm_stage_pick")
+    # ---- Optional Deal Stage filter (applies to population)
+    d = df_f.copy()
+    if dealstage_col and dealstage_col in d.columns:
+        stage_vals = ["All"] + sorted(d[dealstage_col].dropna().astype(str).unique().tolist())
+        sel_stages = st.multiselect(
+            "Deal Stage (optional filter on population)",
+            stage_vals, default=["All"], key="lm_stage_filter"
+        )
+        if "All" not in sel_stages:
+            d = d[d[dealstage_col].astype(str).isin(sel_stages)].copy()
     else:
-        sel_ds = ["All"]
-        st.info("Deal Stage column not found — stage filter disabled.")
-
-    d_base = df_f.copy()
-    if dealstage_col and "All" not in sel_ds:
-        d_base = d_base[d_base[dealstage_col].astype(str).isin(sel_ds)].copy()
-
-    # ---- Date scope (BY CREATE DATE / DEAL DATE)
-    st.markdown("**Date scope (by Create Date / deal date)**")
-    d1, d2 = st.columns(2)
-    scope_mode = st.radio("Preset", ["This month", "Last month", "Custom"], index=0, horizontal=True, key="lm_scope")
-    if scope_mode == "This month":
-        range_start, range_end = month_bounds(today)
-    elif scope_mode == "Last month":
-        range_start, range_end = last_month_bounds(today)
-    else:
-        with d1:
-            range_start = st.date_input("Start (Create Date)", value=today.replace(day=1), key="lm_cstart")
-        with d2:
-            range_end = st.date_input("End (Create Date)", value=month_bounds(today)[1], key="lm_cend")
-        if range_end < range_start:
-            st.error("End date cannot be before start date.")
-            st.stop()
-    st.caption(f"Create Date scope: **{range_start} → {range_end}**")
-
-    # Filter population by Create Date window
-    d = d_base.copy()
-    d["_create_dt"] = coerce_datetime(d[create_col])
-    in_scope = d["_create_dt"].dt.date.between(range_start, range_end)
-    d = d.loc[in_scope].copy()
-
-    # ---- Reference date selection (which 'last touch' to measure inactivity from)
-    ref_pick = st.radio(
-        "Reference for inactivity",
-        options=["Last Connected", "Lead Activity Date"],
-        index=0, horizontal=True, key="lm_ref_pick",
-        help="Days since the chosen timestamp."
-    )
-    ref_col = last_connected_col if ref_pick == "Last Connected" else lead_activity_col
-
-    # Guard: ensure reference column exists
-    if not ref_col or ref_col not in d.columns:
-        st.warning(f"Column for **{ref_pick}** not found — nothing to compute.")
-        st.stop()
-
-    # ---- Compute 'days since' safely (stay datetime64[ns], no .dt.date chaining)
-    d["_ref_dt"] = coerce_datetime(d[ref_col])
-    d["_days_since"] = (pd.Timestamp(today) - d["_ref_dt"]).dt.days
-    valid_mask = pd.to_numeric(d["_days_since"], errors="coerce").notna() & (d["_days_since"] >= 0)
-    d = d.loc[valid_mask].copy()
+        st.caption("Deal Stage column not found — stage filter disabled.")
 
     if d.empty:
-        st.info("No rows with a valid reference timestamp in the selected Create Date scope.")
+        st.info("No rows after filters.")
         st.stop()
 
-    # ---- Granularity / bucketing
-    bucket_mode = st.radio(
-        "Inactivity bucket granularity",
-        ["Fixed (0–7,8–14,15–30,31–60,61+)", "Weekly", "Monthly"],
-        index=0, horizontal=True, key="lm_bucket_mode"
+    # ---- Date scope (population by Create Date)
+    st.markdown("**Date scope (based on Create Date)**")
+    c1, c2 = st.columns(2)
+    scope_pick = st.radio(
+        "Presets",
+        ["Yesterday", "Today", "This month", "Last month", "Custom"],
+        index=2, horizontal=True, key="lm_scope"
     )
+    if scope_pick == "Yesterday":
+        scope_start, scope_end = yday, yday
+    elif scope_pick == "Today":
+        scope_start, scope_end = today, today
+    elif scope_pick == "This month":
+        scope_start, scope_end = month_bounds(today)
+    elif scope_pick == "Last month":
+        scope_start, scope_end = last_month_bounds(today)
+    else:
+        with c1:
+            scope_start = st.date_input("Start (Create Date)", value=today.replace(day=1), key="lm_cstart")
+        with c2:
+            scope_end = st.date_input("End (Create Date)", value=month_bounds(today)[1], key="lm_cend")
+        if scope_end < scope_start:
+            st.error("End date cannot be before start date.")
+            st.stop()
 
-    def make_buckets(s: pd.Series, mode: str) -> pd.Categorical:
-        if s.empty:
-            return pd.Categorical([])
-        if mode == "Fixed (0–7,8–14,15–30,31–60,61+)":
-            bins = [-1, 7, 14, 30, 60, 10_000]
-            labels = ["0–7", "8–14", "15–30", "31–60", "61+"]
-            return pd.cut(s, bins=bins, labels=labels)
-        elif mode == "Weekly":
-            mx = int(s.max())
-            edges = list(range(0, mx + 7, 7))
-            labels = [f"{a}–{b-1}" for a, b in zip(edges[:-1], edges[1:])]
-            return pd.cut(s, bins=[-1] + edges[1:], labels=labels)
-        else:  # Monthly
-            mx = int(s.max())
-            edges = list(range(0, mx + 30, 30))
-            labels = [f"{a}–{b-1}" for a, b in zip(edges[:-1], edges[1:])]
-            return pd.cut(s, bins=[-1] + edges[1:], labels=labels)
+    st.caption(f"Create-date scope: **{scope_start} → {scope_end}**")
 
-    d["Bucket"] = make_buckets(d["_days_since"], bucket_mode)
-
-    # ---- Seek bar / threshold to focus on stale leads
-    max_days = int(d["_days_since"].max()) if len(d) else 0
-    min_cut = st.slider("Show leads with inactivity ≥ (days)", min_value=0, max_value=max(7, max_days), value=0, step=1, key="lm_min_cut")
-    d_focus = d.loc[d["_days_since"] >= min_cut].copy()
-
-    st.caption(
-        f"Rows after filters • Deal Stage: "
-        f"{'All' if ('All' in sel_ds or not dealstage_col) else ', '.join(sel_ds)} • "
-        f"Ref: **{ref_pick}** • Inactivity ≥ **{min_cut}** days — **{len(d_focus):,}** rows"
+    # ---- Choose reference date for inactivity
+    ref_pick = st.radio(
+        "Reference date (for inactivity days)",
+        ["Last Connected", "Lead Activity Date"],
+        index=0, horizontal=True, key="lm_ref_pick"
     )
-
-    # =========================
-    # Summary: distribution (overall or source-stacked)
-    # =========================
-    st.markdown("### Inactivity distribution (by bucket)")
-    stack_by_source = st.checkbox("Stack by Deal Source", value=False, key="lm_stack_toggle")
-    if stack_by_source and (source_col is None or source_col not in d_focus.columns):
-        st.info("Deal Source column not found — showing overall distribution instead.")
-        stack_by_source = False
-
-    if not stack_by_source:
-        # Overall distribution by bucket — line chart
-        dist = (
-            d_focus.groupby("Bucket", observed=True)
-                   .size().rename("Count").reset_index()
-        )
-        if pd.api.types.is_categorical_dtype(dist["Bucket"]):
-            bucket_order = [str(x) for x in dist["Bucket"].cat.categories]
-        else:
-            bucket_order = sorted(dist["Bucket"].astype(str).unique().tolist())
-        dist["Bucket"] = dist["Bucket"].astype(str)
-
-        line_chart = alt.Chart(dist).mark_line(point=True).encode(
-            x=alt.X("Bucket:N", sort=bucket_order, title="Inactivity bucket (days)"),
-            y=alt.Y("Count:Q", title="Leads"),
-            tooltip=[alt.Tooltip("Bucket:N"), alt.Tooltip("Count:Q")]
-        ).properties(height=340, title="Overall inactivity distribution")
-        st.altair_chart(line_chart, use_container_width=True)
-
-        st.download_button(
-            "Download CSV — Inactivity distribution (overall)",
-            data=dist.to_csv(index=False).encode("utf-8"),
-            file_name="lead_movement_inactivity_overall.csv",
-            mime="text/csv",
-            key="lm_dl_overall"
-        )
+    if ref_pick == "Last Connected":
+        ref_col = last_connected_col if (last_connected_col and last_connected_col in d.columns) else None
     else:
-        # Source-stacked (key or raw)
-        use_key_src = st.checkbox(
-            "Use key-source grouping (Referral / PM - Search / PM - Social / Other)",
-            value=True, key="lm_use_key_src_stack"
-        )
-        d_src = assign_src_pick(d_focus, source_col, use_key_src)  # adds _src_pick
+        ref_col = lead_activity_col if (lead_activity_col and lead_activity_col in d.columns) else None
 
-        # optional include list
-        src_opts = sorted(d_src["_src_pick"].astype(str).unique().tolist())
-        sel_srcs = st.multiselect("Include Deal Sources", options=src_opts, default=src_opts, key="lm_src_keep")
-        d_src = d_src[d_src["_src_pick"].isin(sel_srcs)].copy()
+    if not ref_col:
+        st.warning(f"Selected reference column for '{ref_pick}' not found in data.")
+        st.stop()
 
-        agg = (
-            d_src.groupby(["Bucket", "_src_pick"], observed=True)
-                 .size().rename("Count").reset_index()
-        )
-        if pd.api.types.is_categorical_dtype(agg["Bucket"]):
-            bucket_order = [str(x) for x in agg["Bucket"].cat.categories]
-        else:
-            bucket_order = sorted(agg["Bucket"].astype(str).unique().tolist())
-        agg["Bucket"] = agg["Bucket"].astype(str)
+    # ---- Build in-scope dataset (population by Create Date)
+    d["_cdate"] = coerce_datetime(d[create_col]).dt.date
+    pop_mask = d["_cdate"].between(scope_start, scope_end)
+    d_work = d.loc[pop_mask].copy()
 
-        stacked = alt.Chart(agg).mark_bar().encode(
-            x=alt.X("Bucket:N", sort=bucket_order, title="Inactivity bucket (days)"),
-            y=alt.Y("Count:Q", title="Leads"),
-            color=alt.Color("_src_pick:N", title="Deal Source", legend=alt.Legend(orient="bottom", labelLimit=280)),
-            order=alt.Order("_src_pick:N"),
-            tooltip=[
-                alt.Tooltip("Bucket:N", title="Bucket"),
-                alt.Tooltip("_src_pick:N", title="Deal Source"),
-                alt.Tooltip("Count:Q", title="Count")
-            ]
-        ).properties(height=360, title=f"Inactivity distribution by {ref_pick} — stacked by Deal Source")
-        st.altair_chart(stacked, use_container_width=True)
+    # Compute inactivity days from chosen reference column
+    d_work["_ref_dt"] = coerce_datetime(d_work[ref_col])
+    # Safe diff: NaT -> NaN
+    d_work["_days_since"] = (pd.Timestamp(today) - d_work["_ref_dt"]).dt.days
 
-        st.download_button(
-            "Download CSV — Inactivity × Deal Source",
-            data=agg.rename(columns={"_src_pick":"Deal Source"}).to_csv(index=False).encode("utf-8"),
-            file_name="lead_movement_inactivity_by_source.csv",
-            mime="text/csv",
-            key="lm_dl_by_source"
-        )
-
-    # =========================
-    # NEW: Country-wise stacked distribution (+ Top 5 countries)
-    # =========================
-    st.markdown("### Inactivity distribution by Country (stacked)")
-
-    if not country_col or country_col not in d_focus.columns:
-        st.info("Country column not found — cannot build country-wise distribution.")
+    # ---- Slider (inactivity range)
+    valid_days = d_work["_days_since"].dropna()
+    if valid_days.empty:
+        min_d, max_d = 0, 90
     else:
-        d_cty = d_focus.copy()
-        d_cty["_Country"] = d_cty[country_col].fillna("Unknown").astype(str)
+        min_d, max_d = int(valid_days.min()), int(valid_days.max())
+        # clean bounds
+        min_d = min(0, min_d)
+        max_d = max(1, max_d)
+    days_low, days_high = st.slider(
+        "Inactivity range (days)",
+        min_value=int(min_d), max_value=int(max_d),
+        value=(min(7, max(0, min_d)), min(30, max_d)),
+        step=1, key="lm_range"
+    )
+    range_mask = d_work["_days_since"].between(days_low, days_high)
 
-        # Compute totals by country to determine Top 5
-        totals_cty = (
-            d_cty.groupby("_Country", observed=True).size()
-                 .rename("Total").reset_index()
-                 .sort_values("Total", ascending=False)
+    # ---- Bucketize inactivity for stacked charts
+    def bucketize(n):
+        if pd.isna(n):
+            return "Unknown"
+        n = int(n)
+        if n <= 1:   return "0–1"
+        if n <= 3:   return "2–3"
+        if n <= 7:   return "4–7"
+        if n <= 14:  return "8–14"
+        if n <= 30:  return "15–30"
+        if n <= 60:  return "31–60"
+        if n <= 90:  return "61–90"
+        return "90+"
+
+    d_work["Bucket"] = d_work["_days_since"].apply(bucketize)
+    bucket_order = ["0–1","2–3","4–7","8–14","15–30","31–60","61–90","90+","Unknown"]
+
+    # ---- Stacked by Deal Source
+    st.markdown("### Inactivity distribution — stacked by JetLearn Deal Source")
+    if source_col and source_col in d_work.columns:
+        d_work["_source"] = d_work[source_col].fillna("Unknown").astype(str)
+        by_src = (
+            d_work.groupby(["Bucket","_source"])
+                  .size().reset_index(name="Count")
         )
-        top5 = totals_cty["_Country"].head(5).tolist()
+        chart_src = (
+            alt.Chart(by_src)
+            .mark_bar(opacity=0.9)
+            .encode(
+                x=alt.X("Bucket:N", sort=bucket_order, title="Inactivity bucket (days)"),
+                y=alt.Y("Count:Q", stack=True, title="Count"),
+                color=alt.Color("_source:N", title="Deal Source", legend=alt.Legend(orient="bottom")),
+                tooltip=[alt.Tooltip("Bucket:N"), alt.Tooltip("_source:N", title="Deal Source"), alt.Tooltip("Count:Q")]
+            )
+            .properties(height=360, title=f"Inactivity by {ref_pick} — stacked by Deal Source")
+        )
+        st.altair_chart(chart_src, use_container_width=True)
+    else:
+        st.info("Deal Source column not found — skipping source-wise stack.")
 
-        show_all_countries = st.checkbox("Show ALL countries (otherwise show Top 5)", value=False, key="lm_country_show_all")
+    # ---- Stacked by Country (Top-5 toggle)
+    st.markdown("### Inactivity distribution — stacked by Country")
+    if country_col and country_col in d_work.columns:
+        d_work["_country"] = d_work[country_col].fillna("Unknown").astype(str)
+        totals_country = d_work.groupby("_country").size().sort_values(ascending=False)
+        show_all_countries = st.checkbox(
+            "Show all countries (uncheck to show Top 5 only)",
+            value=False, key="lm_show_all_cty"
+        )
         if show_all_countries:
-            keep_countries = totals_cty["_Country"].tolist()
-            title_suffix = "All Countries"
+            keep_countries = totals_country.index.tolist()
+            title_suffix = "All countries"
         else:
-            keep_countries = top5
-            title_suffix = "Top 5 Countries"
+            keep_countries = totals_country.head(5).index.tolist()
+            title_suffix = "Top 5 countries"
 
-        d_cty = d_cty[d_cty["_Country"].isin(keep_countries)].copy()
-
-        agg_cty = (
-            d_cty.groupby(["Bucket", "_Country"], observed=True)
-                 .size().rename("Count").reset_index()
+        by_cty = (
+            d_work[d_work["_country"].isin(keep_countries)]
+            .groupby(["Bucket","_country"]).size().reset_index(name="Count")
         )
-
-        if pd.api.types.is_categorical_dtype(agg_cty["Bucket"]):
-            bucket_order = [str(x) for x in agg_cty["Bucket"].cat.categories]
-        else:
-            bucket_order = sorted(agg_cty["Bucket"].astype(str).unique().tolist())
-        agg_cty["Bucket"] = agg_cty["Bucket"].astype(str)
-
-        cty_stacked = alt.Chart(agg_cty).mark_bar().encode(
-            x=alt.X("Bucket:N", sort=bucket_order, title="Inactivity bucket (days)"),
-            y=alt.Y("Count:Q", title="Leads"),
-            color=alt.Color("_Country:N", title="Country", legend=alt.Legend(orient="bottom", labelLimit=260)),
-            order=alt.Order("_Country:N"),
-            tooltip=[
-                alt.Tooltip("Bucket:N", title="Bucket"),
-                alt.Tooltip("_Country:N", title="Country"),
-                alt.Tooltip("Count:Q", title="Count"),
-            ],
-        ).properties(height=360, title=f"Inactivity distribution by {ref_pick} — {title_suffix}")
-        st.altair_chart(cty_stacked, use_container_width=True)
-
-        st.download_button(
-            f"Download CSV — Inactivity × Country ({'All' if show_all_countries else 'Top 5'})",
-            data=agg_cty.rename(columns={"_Country":"Country"}).to_csv(index=False).encode("utf-8"),
-            file_name=f"lead_movement_inactivity_by_country_{'all' if show_all_countries else 'top5'}.csv",
-            mime="text/csv",
-            key="lm_dl_by_country"
+        chart_cty = (
+            alt.Chart(by_cty)
+            .mark_bar(opacity=0.9)
+            .encode(
+                x=alt.X("Bucket:N", sort=bucket_order, title="Inactivity bucket (days)"),
+                y=alt.Y("Count:Q", stack=True, title="Count"),
+                color=alt.Color("_country:N", title="Country", legend=alt.Legend(orient="bottom")),
+                tooltip=[alt.Tooltip("Bucket:N"), alt.Tooltip("_country:N", title="Country"), alt.Tooltip("Count:Q")]
+            )
+            .properties(height=360, title=f"Inactivity by {ref_pick} — stacked by Country ({title_suffix})")
         )
-
-        # Additional: Top Countries bar chart (total counts in current selection)
-        st.markdown("#### Top countries (total inactive leads)")
-        top_cty_chart_data = totals_cty[totals_cty["_Country"].isin(keep_countries)].copy()
-        top_cty_chart = alt.Chart(top_cty_chart_data).mark_bar().encode(
-            x=alt.X("Total:Q", title="Leads"),
-            y=alt.Y("_Country:N", sort='-x', title="Country"),
-            tooltip=[alt.Tooltip("_Country:N", title="Country"), alt.Tooltip("Total:Q", title="Leads")],
-        ).properties(height=280, title=f"{title_suffix} — total inactive leads")
-        st.altair_chart(top_cty_chart, use_container_width=True)
-
-        st.download_button(
-            f"Download CSV — Totals by Country ({'All' if show_all_countries else 'Top 5'})",
-            data=top_cty_chart_data.rename(columns={"_Country":"Country"}).to_csv(index=False).encode("utf-8"),
-            file_name=f"lead_movement_totals_by_country_{'all' if show_all_countries else 'top5'}.csv",
-            mime="text/csv",
-            key="lm_dl_cty_totals"
-        )
-
-    # =========================
-    # Detail view — Deal Stage breakdown (for current threshold)
-    # =========================
-    st.markdown("### Detail: Deal Stage of inactive leads (at current threshold)")
-    if not dealstage_col or dealstage_col not in d_focus.columns:
-        st.info("Deal Stage column not found — cannot show stage breakdown.")
+        st.altair_chart(chart_cty, use_container_width=True)
     else:
-        d_focus["_stage"] = d_focus[dealstage_col].fillna("Unknown").astype(str)
-        by_stage = (
-            d_focus.groupby(["Bucket","_stage"], observed=True)
-                   .size().rename("Count").reset_index()
+        st.info("Country column not found — skipping country-wise stack.")
+
+    # ---- Deal Stage detail for selected inactivity range
+    st.markdown("### Deal Stage detail — for selected inactivity range")
+    if dealstage_col and dealstage_col in d_work.columns:
+        stage_counts = (
+            d_work.loc[range_mask, dealstage_col]
+                  .fillna("Unknown").astype(str)
+                  .value_counts().reset_index()
         )
-        if pd.api.types.is_categorical_dtype(by_stage["Bucket"]):
-            bucket_order = [str(x) for x in by_stage["Bucket"].cat.categories]
-        else:
-            bucket_order = sorted(by_stage["Bucket"].astype(str).unique().tolist())
-        by_stage["Bucket"] = by_stage["Bucket"].astype(str)
-
-        # Small stacked bars per bucket by stage
-        stage_chart = alt.Chart(by_stage).mark_bar().encode(
-            x=alt.X("Bucket:N", sort=bucket_order, title="Inactivity bucket (days)"),
-            y=alt.Y("Count:Q", title="Leads"),
-            color=alt.Color("_stage:N", title="Deal Stage", legend=alt.Legend(orient="right", labelLimit=260)),
-            tooltip=[alt.Tooltip("Bucket:N"), alt.Tooltip("_stage:N", title="Deal Stage"), alt.Tooltip("Count:Q")]
-        ).properties(height=340, title="Inactive leads by Deal Stage (stacked)")
-        st.altair_chart(stage_chart, use_container_width=True)
-
-        # Download & table
+        stage_counts.columns = ["Deal Stage", "Count"]
+        st.dataframe(stage_counts, use_container_width=True)
         st.download_button(
-            "Download CSV — Inactivity × Deal Stage",
-            data=by_stage.rename(columns={"_stage":"Deal Stage"}).to_csv(index=False).encode("utf-8"),
-            file_name="lead_movement_inactivity_by_dealstage.csv",
+            "Download CSV — Deal Stage counts (selected inactivity range)",
+            data=stage_counts.to_csv(index=False).encode("utf-8"),
+            file_name="lead_movement_dealstage_counts.csv",
             mime="text/csv",
-            key="lm_dl_by_stage"
-        )
-        with st.expander("View table"):
-            show_tbl = by_stage.rename(columns={"_stage":"Deal Stage"})
-            st.dataframe(show_tbl, use_container_width=True)
-
-    # =========================
-    # (Optional) raw rows preview
-    # =========================
-    with st.expander("Preview rows (top 500)"):
-        show_cols = []
-        if create_col: show_cols.append(create_col)
-        if ref_col:    show_cols.append(ref_col)
-        if dealstage_col: show_cols.append(dealstage_col)
-        if source_col: show_cols.append(source_col)
-        if country_col: show_cols.append(country_col)
-        preview = d_focus[show_cols].copy() if show_cols else d_focus.copy()
-        preview["Days since"] = d_focus["_days_since"].astype(int)
-        preview["Bucket"] = d_focus["Bucket"].astype(str)
-        st.dataframe(preview.head(500), use_container_width=True)
-        st.download_button(
-            "Download CSV — Rows (current filters)",
-            data=preview.to_csv(index=False).encode("utf-8"),
-            file_name="lead_movement_rows.csv",
-            mime="text/csv",
-            key="lm_dl_rows"
+            key="lm_stage_dl"
         )
 
-        # ---- Conversion% stacked (Paid / Created) — contribution-based so stacks sum to AC total
-        g_merge = (
-            g_create.rename(columns={"Count": "Created"})
-                    .merge(g_pay.rename(columns={"Count": "Paid"}),
-                           on=["Academic Counsellor", "Deal Source"], how="outer")
-                    .fillna({"Created": 0, "Paid": 0})
-        )
-
-        # Keep AC ordering & selection
-        if ac_order:
-            g_merge = g_merge[g_merge["Academic Counsellor"].isin(ac_order)].copy()
-            g_merge["Academic Counsellor"] = pd.Categorical(
-                g_merge["Academic Counsellor"], categories=ac_order, ordered=True
-            )
-
-        # Per-source raw conversion (for tooltip)
-        g_merge["ConvPct_Source"] = np.where(
-            g_merge["Created"] > 0, g_merge["Paid"] / g_merge["Created"] * 100.0, 0.0
-        )
-
-        # Contribution to AC-level conversion:
-        # stack metric = (Paid_source / Created_total_of_AC) * 100
-        created_total_ac = g_merge.groupby("Academic Counsellor")["Created"].transform("sum")
-        paid_total_ac    = g_merge.groupby("Academic Counsellor")["Paid"].transform("sum")
-        g_merge["ConvPct_AC_Total"] = np.where(
-            created_total_ac > 0, paid_total_ac / created_total_ac * 100.0, 0.0
-        )
-        g_merge["ConvPct_Stack"] = np.where(
-            created_total_ac > 0, g_merge["Paid"] / created_total_ac * 100.0, 0.0
-        )
-
-        def conversion_chart_contribution(g):
-            if g.empty:
-                return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_bar()
-
-            tooltips = [
-                alt.Tooltip("Academic Counsellor:N"),
-                alt.Tooltip("Deal Source:N"),
-                alt.Tooltip("Created:Q"),
-                alt.Tooltip("Paid:Q"),
-                alt.Tooltip("ConvPct_Source:Q", title="Source Conv% (Paid/Created)", format=".1f"),
-                alt.Tooltip("ConvPct_AC_Total:Q", title="AC Total Conv%", format=".1f"),
-                alt.Tooltip("ConvPct_Stack:Q", title="Stack Contribution %", format=".1f"),
-            ]
-            return (
-                alt.Chart(g)
-                .mark_bar(opacity=0.9)
-                .encode(
-                    x=alt.X("Academic Counsellor:N", sort=ac_order, title="Academic Counsellor"),
-                    y=alt.Y(
-                        "ConvPct_Stack:Q",
-                        title="Conversion % (Paid / Created) — stacked by source",
-                        scale=alt.Scale(domain=[0, 100]),
-                        stack=True
-                    ),
-                    color=alt.Color("Deal Source:N", legend=alt.Legend(orient="bottom", title="Deal Source")),
-                    tooltip=tooltips,
-                )
-                .properties(height=360, title="Conversion % — stacked by Deal Source (contribution to AC total)")
-            )
-
-        col_pay, col_create, col_conv = st.columns(3)
-        with col_pay:
-            st.altair_chart(
-                stacked_chart(g_pay_c, "Payments (Payment Received — stacked by Deal Source)", use_pct=normalize_pct),
-                use_container_width=True
-            )
-        with col_create:
-            st.altair_chart(
-                stacked_chart(g_create_c, "Deals Created (Create Date — stacked by Deal Source)", use_pct=normalize_pct),
-                use_container_width=True
-            )
-        with col_conv:
-            st.altair_chart(conversion_chart_contribution(g_merge), use_container_width=True)
-
-        with st.expander("Download data used in stacked charts"):
+        with st.expander("Show matching rows (first 1000)"):
+            cols_show = []
+            for c in [create_col, dealstage_col, ref_col, country_col, source_col]:
+                if c and c in d_work.columns:
+                    cols_show.append(c)
+            preview = d_work.loc[range_mask, cols_show].head(1000)
+            st.dataframe(preview, use_container_width=True)
             st.download_button(
-                "Download CSV — Payments by AC × Deal Source",
-                data=g_pay_c.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
-                file_name="ac_by_dealsource_payments.csv",
+                "Download CSV — Matching rows",
+                data=d_work.loc[range_mask, cols_show].to_csv(index=False).encode("utf-8"),
+                file_name="lead_movement_matching_rows.csv",
                 mime="text/csv",
-                key="ac_stack_dl_pay"
+                key="lm_rows_dl"
             )
-            st.download_button(
-                "Download CSV — Deals Created by AC × Deal Source",
-                data=g_create_c.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
-                file_name="ac_by_dealsource_created.csv",
-                mime="text/csv",
-                key="ac_stack_dl_created"
-            )
-            st.download_button(
-                "Download CSV — Conversion% by AC × Deal Source (source + contribution)",
-                data=g_merge.sort_values(["Academic Counsellor", "Deal Source"]).to_csv(index=False).encode("utf-8"),
-                file_name="ac_by_dealsource_conversion_pct_contribution.csv",
-                mime="text/csv",
-                key="ac_stack_dl_conv"
-            )
+    else:
+        st.info("Deal Stage column not found — cannot show stage detail.")
+
+    # ---- Quick KPIs
+    total_in_scope = int(len(d_work))
+    missing_ref = int(d_work["_ref_dt"].isna().sum())
+    selected_cnt = int(range_mask.sum())
+    st.markdown(
+        f"<div class='kpi-card'>"
+        f"<div class='kpi-title'>In-scope leads (Create Date {scope_start} → {scope_end})</div>"
+        f"<div class='kpi-value'>{total_in_scope:,}</div>"
+        f"<div class='kpi-sub'>Missing {ref_pick}: {missing_ref:,} • In range {days_low}–{days_high} days: {selected_cnt:,}</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
 
 elif view == "AC Wise Detail":
     st.subheader("AC Wise Detail – Create-date scoped counts & % conversions")
