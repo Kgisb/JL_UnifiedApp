@@ -3117,14 +3117,11 @@ elif view == "AC Wise Detail":
             st.error("End date cannot be before start date.")
             st.stop()
 
-    # Mode mirrors the app's MTD vs Cohort semantics used elsewhere:
-    # - MTD  : event is counted only if (Create in scope) AND (Event date in scope)
-    # - Cohort: event counted if (Event date in scope), regardless of Create-date scope
+    # Mode: MTD vs Cohort
     mode = st.radio("Counting mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ac_mode")
-
     st.caption(f"Create-date scope: **{scope_start} → {scope_end}** • Mode: **{mode}**")
 
-    # ---- Start from globally filtered df_f, then apply optional Deal Stage filter and create-date population (for MTD displays & Create counts)
+    # ---- Start from globally filtered df_f, then optional Deal Stage filter
     d = df_f.copy()
 
     # Optional Deal Stage filter
@@ -3167,14 +3164,13 @@ elif view == "AC Wise Detail":
         ind_done   = pop_mask & m_done
         ind_paid   = pop_mask & m_paid
     else:  # Cohort
-        # Create counts still reflect the Create-date scope, while events use event-date-only scope
         ind_create = pop_mask
         ind_first  = m_first
         ind_resch  = m_resch
         ind_done   = m_done
         ind_paid   = m_paid
 
-    # Referral Intent – treat truthy strings as intent present; count against Create-date scope
+    # Referral Intent – treat truthy strings as present; count against Create-date scope
     def _is_ref_intent(x):
         if pd.isna(x): return False
         s = str(x).strip().lower()
@@ -3186,8 +3182,12 @@ elif view == "AC Wise Detail":
     )
     ind_ref_intent = pop_mask & ref_intent_present
 
-    # ---- Build AC-wise table
-    sub = pd.DataFrame({
+    # ---------- NEW: Aggregate toggle (All Academic Counsellors) ----------
+    st.markdown("#### Display mode")
+    show_all_ac = st.checkbox("Aggregate all Academic Counsellors (show totals only)", value=False, key="ac_all_toggle")
+
+    # ---- Build AC-wise table (or aggregated)
+    base_sub = pd.DataFrame({
         "Academic Counsellor": d["_ac"],
         "Create Date — Count": ind_create.astype(int),
         "First Cal — Count": ind_first.astype(int),
@@ -3196,24 +3196,33 @@ elif view == "AC Wise Detail":
         "Payment Received — Count": ind_paid.astype(int),
         "Referral Intent (sales) — Count": ind_ref_intent.astype(int),
     })
-    agg = (
-        sub.groupby("Academic Counsellor", as_index=False)
-           .sum(numeric_only=True)
-           .sort_values("Create Date — Count", ascending=False)
-    )
+
+    if show_all_ac:
+        agg = (
+            base_sub.drop(columns=["Academic Counsellor"])
+                    .sum(numeric_only=True)
+                    .to_frame().T
+        )
+        agg.insert(0, "Academic Counsellor", "All ACs (Total)")
+    else:
+        agg = (
+            base_sub.groupby("Academic Counsellor", as_index=False)
+                    .sum(numeric_only=True)
+                    .sort_values("Create Date — Count", ascending=False)
+        )
 
     st.markdown("### AC-wise counts")
     st.dataframe(agg, use_container_width=True)
     st.download_button(
         "Download CSV — AC-wise counts",
         data=agg.to_csv(index=False).encode("utf-8"),
-        file_name=f"ac_wise_counts_{mode.lower()}.csv",
+        file_name=f"ac_wise_counts_{'all' if show_all_ac else 'by_ac'}_{mode.lower()}.csv",
         mime="text/csv",
         key="ac_dl_counts"
     )
 
-    # ---- % Conversion between two chosen metrics (per AC)
-    st.markdown("### Conversion % between two metrics (per AC)")
+    # ---- % Conversion between two chosen metrics (per AC or totals)
+    st.markdown("### Conversion % between two metrics")
     metric_labels = [
         "Create Date — Count",
         "First Cal — Count",
@@ -3234,20 +3243,20 @@ elif view == "AC Wise Detail":
         (pct_tbl[numer_label] / pct_tbl[denom_label]) * 100.0,
         0.0
     ).round(1)
-    pct_tbl = pct_tbl.sort_values("%", ascending=False)
+    pct_tbl = pct_tbl.sort_values("%", ascending=False) if not show_all_ac else pct_tbl
 
     st.dataframe(pct_tbl, use_container_width=True)
     st.download_button(
         "Download CSV — Conversion %",
         data=pct_tbl.to_csv(index=False).encode("utf-8"),
-        file_name=f"ac_wise_conversion_percent_{mode.lower()}.csv",
+        file_name=f"ac_conversion_percent_{'all' if show_all_ac else 'by_ac'}_{mode.lower()}.csv",
         mime="text/csv",
         key="ac_dl_pct"
     )
 
-    # Overall KPI
-    den_sum = int(agg[denom_label].sum())
-    num_sum = int(agg[numer_label].sum())
+    # Overall KPI from the table in view (works for both modes)
+    den_sum = int(pct_tbl[denom_label].sum())
+    num_sum = int(pct_tbl[numer_label].sum())
     overall_pct = (num_sum / den_sum * 100.0) if den_sum > 0 else 0.0
     st.markdown(
         f"<div class='kpi-card'><div class='kpi-title'>Overall {numer_label} / {denom_label} ({mode})</div>"
@@ -3256,8 +3265,8 @@ elif view == "AC Wise Detail":
         unsafe_allow_html=True
     )
 
-    # ---- Breakdown: AC × (Deal Source or Country)
-    st.markdown("### AC × (Deal Source or Country) breakdown")
+    # ---- Breakdown: AC × (Deal Source or Country) or Totals × (…)
+    st.markdown("### Breakdown")
     grp_mode = st.radio("Group by", ["JetLearn Deal Source", "Country"], index=0, horizontal=True, key="ac_grp_mode")
 
     have_grp = False
@@ -3285,18 +3294,28 @@ elif view == "AC Wise Detail":
             "Payment Received — Count": ind_paid.astype(int),
             "Referral Intent (sales) — Count": ind_ref_intent.astype(int),
         })
-        gb = (
-            sub2.groupby(["Academic Counsellor","_grp"], as_index=False)
-                .sum(numeric_only=True)
-                .rename(columns={"_grp": grp_mode})
-                .sort_values(["Academic Counsellor","Create Date — Count"], ascending=[True, False])
-        )
+
+        if show_all_ac:
+            gb = (
+                sub2.drop(columns=["Academic Counsellor"])
+                    .groupby("_grp", as_index=False)
+                    .sum(numeric_only=True)
+                    .rename(columns={"_grp": grp_mode})
+                    .sort_values("Create Date — Count", ascending=False)
+            )
+        else:
+            gb = (
+                sub2.groupby(["Academic Counsellor","_grp"], as_index=False)
+                    .sum(numeric_only=True)
+                    .rename(columns={"_grp": grp_mode})
+                    .sort_values(["Academic Counsellor","Create Date — Count"], ascending=[True, False])
+            )
 
         st.dataframe(gb, use_container_width=True)
         st.download_button(
-            f"Download CSV — AC × {grp_mode} breakdown ({mode})",
+            f"Download CSV — {'Totals × ' if show_all_ac else 'AC × '}{grp_mode} breakdown ({mode})",
             data=gb.to_csv(index=False).encode("utf-8"),
-            file_name=f"ac_breakdown_by_{'deal_source' if grp_mode.startswith('JetLearn') else 'country'}_{mode.lower()}.csv",
+            file_name=f"{'totals' if show_all_ac else 'ac'}_breakdown_by_{'deal_source' if grp_mode.startswith('JetLearn') else 'country'}_{mode.lower()}.csv",
             mime="text/csv",
             key="ac_dl_breakdown"
         )
