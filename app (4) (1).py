@@ -2309,6 +2309,70 @@ elif view == "Stuck deals":
 elif view == "Dashboard":
     st.subheader("Dashboard – Key Business Snapshot")
 
+    # =========================
+    # NEW: This Month Cash-in  (Google Sheet A1:E13)
+    # =========================
+    st.markdown("### This Month Cash-in")
+
+    # From your URL:
+    # https://docs.google.com/spreadsheets/d/1tw6gTaUEycAD5DJjw5ASSdF-WwYEt2TqcMb2lTKtKps/edit?gid=0#gid=0
+    SHEET_ID_DEFAULT = "1tw6gTaUEycAD5DJjw5ASSdF-WwYEt2TqcMb2lTKtKps"
+    GID_DEFAULT = "0"  # tab id for "Cash_In Tracker"
+
+    with st.expander("Data source (Google Sheet)", expanded=False):
+        sheet_id = st.text_input("Sheet ID", SHEET_ID_DEFAULT, key="dash_cashin_sheet_id",
+                                 help="The long ID between /d/ and /edit in the sheet URL.")
+        gid = st.text_input("GID (tab id)", GID_DEFAULT, key="dash_cashin_gid",
+                            help="The number after gid= in the sheet URL.")
+        st.caption("Exactly reads range **A1:E13** from the tab via CSV export.")
+
+    @st.cache_data(show_spinner=False)
+    def _load_gsheet_a1_e13(sheet_id: str, gid: str) -> pd.DataFrame:
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+        df_all = pd.read_csv(url)
+        # Take exactly A1:E13 (rows 0..12 and cols 0..4)
+        df = df_all.iloc[0:13, 0:5].copy()
+        # Soft-coerce numeric-looking strings (keep text as-is)
+        for c in df.columns:
+            # remove commas for thousands, keep % as text
+            s = df[c].astype(str)
+            if s.str.fullmatch(r"[\d,\.]+").fillna(False).any():
+                df[c] = pd.to_numeric(s.str.replace(",", ""), errors="ignore")
+        return df
+
+    try:
+        df_cash = _load_gsheet_a1_e13(sheet_id, gid)
+        st.dataframe(df_cash, use_container_width=True)
+
+        with st.expander("Download & quick summary", expanded=False):
+            st.download_button(
+                "Download CSV — This Month Cash-in (A1:E13)",
+                data=df_cash.to_csv(index=False).encode("utf-8"),
+                file_name="this_month_cash_in_A1_E13.csv",
+                mime="text/csv",
+                key="dash_cashin_dl",
+            )
+            # Lightweight numeric summary
+            num_cols = [c for c in df_cash.columns if pd.api.types.is_numeric_dtype(df_cash[c])]
+            if num_cols:
+                summary = pd.DataFrame({
+                    "Sum": df_cash[num_cols].sum(numeric_only=True),
+                    "Average": df_cash[num_cols].mean(numeric_only=True)
+                }).T
+                st.caption("Quick summary across numeric columns:")
+                st.dataframe(summary, use_container_width=True)
+    except Exception as e:
+        st.warning(
+            "Could not load the Google Sheet range A1:E13. "
+            "Confirm the Sheet ID, GID, and that the sheet is shared publicly (Anyone with the link → Viewer)."
+        )
+        st.exception(e)
+
+    st.divider()
+    # =========================
+    # Existing Dashboard content (kept intact)
+    # =========================
+
     # Guards
     if not create_col or not pay_col:
         st.error("Required columns missing: Create Date / Payment Received Date.")
@@ -2434,7 +2498,6 @@ elif view == "Dashboard":
         kpi_block("This Month (MTD)", PERIODS[3][1], PERIODS[3][2])
 
     # ---- Predictability (this month) box ----
-            # ---- Predictability (this month) box ----
     st.markdown("<div class='section-title'>Predictability — This Month</div>", unsafe_allow_html=True)
 
     # Helper: dynamic targets based on Academic Counsellor global filter
@@ -2594,6 +2657,7 @@ elif view == "Dashboard":
         st.altair_chart(chart, use_container_width=True)
     else:
         st.info("No running-month payments in scope to visualize predictability components.")
+
 
 
 elif view == "Daily business":
