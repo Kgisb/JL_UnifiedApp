@@ -166,7 +166,7 @@ with st.sidebar:
     st.header("JetLearn • Navigation")
     view = st.radio(
         "Go to",
-        ["Dashboard", "MIS", "Predictibility", "Trend & Analysis", "80-20", "Stuck deals", "Daily business", "Lead Movement"],  # ← add this
+        ["Dashboard", "MIS", "Predictibility", "AC Wise Detail", "Trend & Analysis", "80-20", "Stuck deals", "Daily business", "Lead Movement"],  # ← add this
         index=0
     )
     track = st.radio("Track", ["Both", "AI Coding", "Math"], index=0)
@@ -3073,4 +3073,206 @@ elif view == "Lead Movement":
             file_name="lead_movement_rows.csv",
             mime="text/csv",
             key="lm_dl_rows"
+        )
+
+elif view == "AC Wise Detail":
+    st.subheader("AC Wise Detail – Create-date scoped counts & % conversions")
+
+    # ---- column mappings (already computed above for most)
+    # counsellor_col, create_col, first_cal_sched_col, cal_resched_col, cal_done_col, pay_col, source_col, country_col exist
+    referral_intent_col = find_col(df, [
+        "Referral Intent Source", "Referral intent source", "Referral Intent",
+        "Referral intent", "ReferralIntent", "Referral_Intention", "Referral Intent (Source)"
+    ])
+
+    if not create_col or not counsellor_col:
+        st.error("Missing required columns (Create Date and Academic Counsellor).")
+        st.stop()
+
+    # ---- Create-Date scope (population filter)
+    st.markdown("**Date scope (population filtered by Create Date)**")
+    c1, c2 = st.columns(2)
+    scope_pick = st.radio("Presets", ["Yesterday", "Today", "This month", "Last month", "Custom"], index=2, horizontal=True, key="ac_scope")
+    if scope_pick == "Yesterday":
+        scope_start, scope_end = yday, yday
+    elif scope_pick == "Today":
+        scope_start, scope_end = today, today
+    elif scope_pick == "This month":
+        scope_start, scope_end = month_bounds(today)
+    elif scope_pick == "Last month":
+        scope_start, scope_end = last_month_bounds(today)
+    else:
+        with c1:
+            scope_start = st.date_input("Start (Create Date)", value=today.replace(day=1), key="ac_cstart")
+        with c2:
+            scope_end = st.date_input("End (Create Date)", value=month_bounds(today)[1], key="ac_cend")
+        if scope_end < scope_start:
+            st.error("End date cannot be before start date.")
+            st.stop()
+    st.caption(f"Population scope by **Create Date**: {scope_start} → {scope_end}")
+
+    # ---- Filter base DF by Create Date window
+    d = df_f.copy()
+    d["_create_dt"] = coerce_datetime(d[create_col]).dt.date
+    in_pop = d["_create_dt"].between(scope_start, scope_end)
+    d = d.loc[in_pop].copy()
+
+    # ---- Optional Deal Stage filter (handy here too)
+    if dealstage_col and dealstage_col in d.columns:
+        stage_vals = ["All"] + sorted(d[dealstage_col].dropna().astype(str).unique().tolist())
+        sel_stages = st.multiselect("Deal Stage (optional filter on population)", stage_vals, default=["All"], key="ac_stage")
+        if "All" not in sel_stages:
+            d = d[d[dealstage_col].astype(str).isin(sel_stages)].copy()
+    else:
+        st.caption("Deal Stage column not found — stage filter disabled.")
+
+    if d.empty:
+        st.info("No rows in the selected Create Date scope (after filters).")
+        st.stop()
+
+    # ---- Normalized helper columns
+    d["_ac"] = d[counsellor_col].fillna("Unknown").astype(str)
+
+    _first = coerce_datetime(d[first_cal_sched_col]) if first_cal_sched_col and first_cal_sched_col in d.columns else pd.Series(pd.NaT, index=d.index)
+    _resch = coerce_datetime(d[cal_resched_col])     if cal_resched_col     and cal_resched_col     in d.columns else pd.Series(pd.NaT, index=d.index)
+    _done  = coerce_datetime(d[cal_done_col])        if cal_done_col        and cal_done_col        in d.columns else pd.Series(pd.NaT, index=d.index)
+    _paid  = coerce_datetime(d[pay_col])             if pay_col             and pay_col             in d.columns else pd.Series(pd.NaT, index=d.index)
+
+    # Referral Intent: treat common truthy patterns as "intent present"
+    def _is_ref_intent(x):
+        if pd.isna(x): return False
+        s = str(x).strip().lower()
+        return (s in {"yes","y","true","t","1"}) or ("referr" in s) or (s not in {"", "no", "n", "false", "0", "none", "nan"})
+
+    ref_intent_present = d[referral_intent_col].map(_is_ref_intent) if referral_intent_col and referral_intent_col in d.columns else pd.Series(False, index=d.index)
+
+    # ---- Build AC-wise table (counts within the population; any non-null date counts as 1)
+    agg = (
+        d.groupby("_ac")
+         .agg(**{
+             "Create Date — Count":         (create_col, "size"),
+             "First Cal — Count":           (lambda df: _first.notna().loc[df.index].sum()),
+             "Cal Rescheduled — Count":     (lambda df: _resch.notna().loc[df.index].sum()),
+             "Cal Done — Count":            (lambda df: _done.notna().loc[df.index].sum()),
+             "Payment Received — Count":    (lambda df: _paid.notna().loc[df.index].sum()),
+             "Referral Intent (sales) — Count": (lambda df: ref_intent_present.loc[df.index].sum()),
+         })
+         .reset_index()
+         .rename(columns={"_ac": "Academic Counsellor"})
+    )
+
+    # The lambda-form above is to keep the groupby context; pandas passes sub-frames/indices per group.
+    # We ensure integer dtype
+    for colname in ["Create Date — Count","First Cal — Count","Cal Rescheduled — Count","Cal Done — Count","Payment Received — Count","Referral Intent (sales) — Count"]:
+        if colname in agg.columns:
+            agg[colname] = agg[colname].astype(int)
+
+    # Sort by Create Date count desc
+    agg = agg.sort_values("Create Date — Count", ascending=False)
+
+    st.markdown("### AC-wise counts (population = deals created in selected scope)")
+    st.dataframe(agg, use_container_width=True)
+    st.download_button(
+        "Download CSV — AC-wise counts",
+        data=agg.to_csv(index=False).encode("utf-8"),
+        file_name="ac_wise_counts.csv",
+        mime="text/csv",
+        key="ac_dl_counts"
+    )
+
+    # ---- % Conversion between two chosen metrics (per AC)
+    st.markdown("### Conversion % between two metrics (per AC)")
+    metric_labels = [
+        "Create Date — Count",
+        "First Cal — Count",
+        "Cal Rescheduled — Count",
+        "Cal Done — Count",
+        "Payment Received — Count",
+        "Referral Intent (sales) — Count",
+    ]
+    c3, c4 = st.columns(2)
+    with c3:
+        denom_label = st.selectbox("Denominator", metric_labels, index=0, key="ac_pct_denom")
+    with c4:
+        numer_label = st.selectbox("Numerator", metric_labels, index=3, key="ac_pct_numer")
+    pct_tbl = agg[["Academic Counsellor", denom_label, numer_label]].copy()
+    # avoid division by zero
+    pct_tbl["%"] = np.where(pct_tbl[denom_label] > 0, (pct_tbl[numer_label] / pct_tbl[denom_label]) * 100.0, 0.0)
+    pct_tbl["%"] = pct_tbl["%"].round(1)
+    pct_tbl = pct_tbl.sort_values("%", ascending=False)
+
+    st.dataframe(pct_tbl, use_container_width=True)
+    st.download_button(
+        "Download CSV — Conversion %",
+        data=pct_tbl.to_csv(index=False).encode("utf-8"),
+        file_name="ac_wise_conversion_percent.csv",
+        mime="text/csv",
+        key="ac_dl_pct"
+    )
+
+    # Overall (totals) quick KPI
+    den_sum = int(agg[denom_label].sum())
+    num_sum = int(agg[numer_label].sum())
+    overall_pct = (num_sum / den_sum * 100.0) if den_sum > 0 else 0.0
+    st.markdown(
+        f"<div class='kpi-card'><div class='kpi-title'>Overall {numer_label} / {denom_label}</div>"
+        f"<div class='kpi-value'>{overall_pct:.1f}%</div>"
+        f"<div class='kpi-sub'>Num: {num_sum:,} • Den: {den_sum:,}</div></div>",
+        unsafe_allow_html=True
+    )
+
+    # ---- Breakdown table 2: choose grouping (Deal Source or Country) with AC
+    st.markdown("### AC × (Deal Source or Country) breakdown")
+    grp_mode = st.radio("Group by", ["JetLearn Deal Source", "Country"], index=0, horizontal=True, key="ac_grp_mode")
+
+    if grp_mode == "JetLearn Deal Source":
+        if not source_col or source_col not in d.columns:
+            st.info("Deal Source column not found.")
+        else:
+            d["_grp"] = d[source_col].fillna("Unknown").astype(str)
+    else:
+        if not country_col or country_col not in d.columns:
+            st.info("Country column not found.")
+        else:
+            d["_grp"] = d[country_col].fillna("Unknown").astype(str)
+
+    if "_grp" in d.columns:
+        # Build the same style counts but grouped by AC and the chosen attribute
+        def _count_series(mask):
+            return (mask).astype(int)
+
+        sub = pd.DataFrame({
+            "Academic Counsellor": d["_ac"],
+            "_grp": d["_grp"],
+            "CreateCnt": 1,
+            "FirstCnt": _first.notna().astype(int),
+            "ReschCnt": _resch.notna().astype(int),
+            "DoneCnt":  _done.notna().astype(int),
+            "PaidCnt":  _paid.notna().astype(int),
+            "RefIntentCnt": ref_intent_present.astype(int),
+        })
+        gb = sub.groupby(["Academic Counsellor","_grp"], as_index=False).sum(numeric_only=True)
+        # rename columns nicely
+        gb = gb.rename(columns={
+            "_grp": grp_mode,
+            "CreateCnt": "Create Date — Count",
+            "FirstCnt": "First Cal — Count",
+            "ReschCnt": "Cal Rescheduled — Count",
+            "DoneCnt": "Cal Done — Count",
+            "PaidCnt": "Payment Received — Count",
+            "RefIntentCnt": "Referral Intent (sales) — Count",
+        })
+        # order for readability
+        show_cols = ["Academic Counsellor", grp_mode,
+                     "Create Date — Count","First Cal — Count","Cal Rescheduled — Count",
+                     "Cal Done — Count","Payment Received — Count","Referral Intent (sales) — Count"]
+        gb = gb[show_cols].sort_values(["Academic Counsellor","Create Date — Count"], ascending=[True, False])
+
+        st.dataframe(gb, use_container_width=True)
+        st.download_button(
+            f"Download CSV — AC × {grp_mode} breakdown",
+            data=gb.to_csv(index=False).encode("utf-8"),
+            file_name=f"ac_breakdown_by_{'deal_source' if grp_mode.startswith('JetLearn') else 'country'}.csv",
+            mime="text/csv",
+            key="ac_dl_breakdown"
         )
