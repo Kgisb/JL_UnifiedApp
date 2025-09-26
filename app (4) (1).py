@@ -3075,240 +3075,88 @@ elif view == "Lead Movement":
             key="lm_dl_rows"
         )
 
-elif view == "AC Wise Detail":
-    st.subheader("AC Wise Detail – Create-date scoped counts & % conversions")
+# ==== AC-wise stacked chart: Payment Received counts stacked by JetLearn Deal Source ====
+st.markdown("### AC × Deal Source — Stacked Payments")
 
-    # ---- Column mappings
-    # We will look specifically for "Referral Intent Source".
-    referral_intent_col = find_col(df, ["Referral Intent Source", "Referral intent source"])
+if not source_col or source_col not in d.columns:
+    st.info("Deal Source column not found — cannot draw stacked chart.")
+else:
+    # Options
+    col_opt1, col_opt2, col_opt3 = st.columns([1,1,1])
+    with col_opt1:
+        normalize_pct = st.checkbox("Show as % of AC total", value=False, key="ac_stack_pct")
+    with col_opt2:
+        sort_mode = st.selectbox("Sort ACs by", ["Payments (desc)", "A–Z"], index=0, key="ac_stack_sort")
+    with col_opt3:
+        top_n = st.number_input("Max ACs to show", min_value=1, max_value=200, value=30, step=1, key="ac_stack_topn")
 
-    if not create_col or not counsellor_col:
-        st.error("Missing required columns (Create Date and Academic Counsellor).")
-        st.stop()
-
-    # ---- Date scope (population by Create Date) & Counting mode
-    st.markdown("**Date scope (based on Create Date) & Counting mode**")
-    c1, c2 = st.columns(2)
-    scope_pick = st.radio(
-        "Presets",
-        ["Yesterday", "Today", "This month", "Last month", "Custom"],
-        index=2, horizontal=True, key="ac_scope"
-    )
-    if scope_pick == "Yesterday":
-        scope_start, scope_end = yday, yday
-    elif scope_pick == "Today":
-        scope_start, scope_end = today, today
-    elif scope_pick == "This month":
-        scope_start, scope_end = month_bounds(today)
-    elif scope_pick == "Last month":
-        scope_start, scope_end = last_month_bounds(today)
-    else:
-        with c1:
-            scope_start = st.date_input("Start (Create Date)", value=today.replace(day=1), key="ac_cstart")
-        with c2:
-            scope_end = st.date_input("End (Create Date)", value=month_bounds(today)[1], key="ac_cend")
-        if scope_end < scope_start:
-            st.error("End date cannot be before start date.")
-            st.stop()
-
-    mode = st.radio("Counting mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ac_mode")
-    st.caption(f"Create-date scope: **{scope_start} → {scope_end}** • Mode: **{mode}**")
-
-    # ---- Start from globally filtered df_f, then optional Deal Stage filter
-    d = df_f.copy()
-
-    if dealstage_col and dealstage_col in d.columns:
-        stage_vals = ["All"] + sorted(d[dealstage_col].dropna().astype(str).unique().tolist())
-        sel_stages = st.multiselect(
-            "Deal Stage (optional filter on population)",
-            stage_vals, default=["All"], key="ac_stage"
-        )
-        if "All" not in sel_stages:
-            d = d[d[dealstage_col].astype(str).isin(sel_stages)].copy()
-    else:
-        st.caption("Deal Stage column not found — stage filter disabled.")
-
-    if d.empty:
-        st.info("No rows after filters.")
-        st.stop()
-
-    # ---- Normalize dates
-    d["_ac"] = d[counsellor_col].fillna("Unknown").astype(str)
-
-    _cdate = coerce_datetime(d[create_col]).dt.date
-    _first = coerce_datetime(d[first_cal_sched_col]).dt.date if first_cal_sched_col and first_cal_sched_col in d.columns else pd.Series(pd.NaT, index=d.index)
-    _resch = coerce_datetime(d[cal_resched_col]).dt.date     if cal_resched_col     and cal_resched_col     in d.columns else pd.Series(pd.NaT, index=d.index)
-    _done  = coerce_datetime(d[cal_done_col]).dt.date        if cal_done_col        and cal_done_col        in d.columns else pd.Series(pd.NaT, index=d.index)
-    _paid  = coerce_datetime(d[pay_col]).dt.date             if pay_col             and pay_col             in d.columns else pd.Series(pd.NaT, index=d.index)
-
-    # Masks
-    pop_mask = _cdate.between(scope_start, scope_end)  # population by Create Date
-    m_first = _first.between(scope_start, scope_end) if _first.notna().any() else pd.Series(False, index=d.index)
-    m_resch = _resch.between(scope_start, scope_end) if _resch.notna().any() else pd.Series(False, index=d.index)
-    m_done  = _done.between(scope_start, scope_end)  if _done.notna().any()  else pd.Series(False, index=d.index)
-    m_paid  = _paid.between(scope_start, scope_end)  if _paid.notna().any()  else pd.Series(False, index=d.index)
-
-    # Apply mode to event indicators
-    if mode == "MTD":
-        ind_create = pop_mask
-        ind_first  = pop_mask & m_first
-        ind_resch  = pop_mask & m_resch
-        ind_done   = pop_mask & m_done
-        ind_paid   = pop_mask & m_paid
-    else:  # Cohort
-        ind_create = pop_mask
-        ind_first  = m_first
-        ind_resch  = m_resch
-        ind_done   = m_done
-        ind_paid   = m_paid
-
-    # ---------- Referral Intent Source = "Sales Generated" only ----------
-    # Count only rows where Referral Intent Source exactly equals "Sales Generated" (case-insensitive, whitespace-safe).
-    if referral_intent_col and referral_intent_col in d.columns:
-        _ref = d[referral_intent_col].astype(str).str.strip().str.lower()
-        sales_generated_mask = (_ref == "sales generated")
-    else:
-        sales_generated_mask = pd.Series(False, index=d.index)
-
-    # Count it against Create-date population (same behavior as earlier request)
-    ind_ref_sales = pop_mask & sales_generated_mask
-
-    # ---------- NEW: Aggregate toggle (All Academic Counsellors) ----------
-    st.markdown("#### Display mode")
-    show_all_ac = st.checkbox("Aggregate all Academic Counsellors (show totals only)", value=False, key="ac_all_toggle")
-
-    # ---- Build AC-wise table (or aggregated)
-    col_label_ref = "Referral Intent Source = Sales Generated — Count"
-
-    base_sub = pd.DataFrame({
-        "Academic Counsellor": d["_ac"],
-        "Create Date — Count": ind_create.astype(int),
-        "First Cal — Count": ind_first.astype(int),
-        "Cal Rescheduled — Count": ind_resch.astype(int),
-        "Cal Done — Count": ind_done.astype(int),
-        "Payment Received — Count": ind_paid.astype(int),
-        col_label_ref:           ind_ref_sales.astype(int),
+    # Build smallest needed frame using the current scope/mode masks already computed above
+    _src_series = d[source_col].fillna("Unknown").astype(str)
+    chart_df = pd.DataFrame({
+        "Academic Counsellor": d["_ac"] if not show_all_ac else pd.Series("All ACs (Total)", index=d.index),
+        "Deal Source": _src_series,
+        "Paid": ind_paid.astype(int),  # indicator already respects MTD/Cohort logic
     })
 
-    if show_all_ac:
-        agg = (
-            base_sub.drop(columns=["Academic Counsellor"])
-                    .sum(numeric_only=True)
-                    .to_frame().T
-        )
-        agg.insert(0, "Academic Counsellor", "All ACs (Total)")
-    else:
-        agg = (
-            base_sub.groupby("Academic Counsellor", as_index=False)
-                    .sum(numeric_only=True)
-                    .sort_values("Create Date — Count", ascending=False)
-        )
-
-    st.markdown("### AC-wise counts")
-    st.dataframe(agg, use_container_width=True)
-    st.download_button(
-        "Download CSV — AC-wise counts",
-        data=agg.to_csv(index=False).encode("utf-8"),
-        file_name=f"ac_wise_counts_{'all' if show_all_ac else 'by_ac'}_{mode.lower()}.csv",
-        mime="text/csv",
-        key="ac_dl_counts"
+    # Group to AC × Source
+    g = (
+        chart_df.groupby(["Academic Counsellor", "Deal Source"], as_index=False)["Paid"]
+                .sum()
+                .rename(columns={"Paid": "Count"})
     )
 
-    # ---- % Conversion between two chosen metrics (per AC or totals)
-    st.markdown("### Conversion % between two metrics")
-    metric_labels = [
-        "Create Date — Count",
-        "First Cal — Count",
-        "Cal Rescheduled — Count",
-        "Cal Done — Count",
-        "Payment Received — Count",
-        col_label_ref,
+    # Totals per AC for sorting and optional % normalization
+    totals = g.groupby("Academic Counsellor", as_index=False)["Count"].sum().rename(columns={"Count":"Total"})
+    g = g.merge(totals, on="Academic Counsellor", how="left")
+
+    # Optional normalization
+    if normalize_pct:
+        g["Pct"] = np.where(g["Total"] > 0, g["Count"] / g["Total"] * 100.0, 0.0)
+
+    # Sorting ACs
+    if sort_mode == "Payments (desc)":
+        ac_order = (
+            totals.sort_values("Total", ascending=False)["Academic Counsellor"]
+                  .head(int(top_n))
+                  .tolist()
+        )
+    else:
+        ac_order = (
+            totals.sort_values("Academic Counsellor")["Academic Counsellor"]
+                  .head(int(top_n))
+                  .tolist()
+        )
+    g = g[g["Academic Counsellor"].isin(ac_order)]
+    # Ensure categorical order for x-axis
+    g["Academic Counsellor"] = pd.Categorical(g["Academic Counsellor"], categories=ac_order, ordered=True)
+
+    # Interactive legend selection
+    sel = alt.selection_point(fields=["Deal Source"], bind="legend")
+
+    # Build chart
+    y_field = alt.Y("Pct:Q", title="% of AC total", stack=True) if normalize_pct else alt.Y("Count:Q", title="Payments (count)", stack=True)
+    tooltip_fields = [
+        alt.Tooltip("Academic Counsellor:N"),
+        alt.Tooltip("Deal Source:N"),
+        alt.Tooltip("Count:Q", title="Payments"),
+        alt.Tooltip("Total:Q", title="AC Total"),
     ]
-    c3, c4 = st.columns(2)
-    with c3:
-        denom_label = st.selectbox("Denominator", metric_labels, index=0, key="ac_pct_denom")
-    with c4:
-        numer_label = st.selectbox("Numerator",  metric_labels, index=3, key="ac_pct_numer")
+    if normalize_pct:
+        tooltip_fields.append(alt.Tooltip("Pct:Q", title="% of AC", format=".1f"))
 
-    pct_tbl = agg[["Academic Counsellor", denom_label, numer_label]].copy()
-    pct_tbl["%"] = np.where(
-        pct_tbl[denom_label] > 0,
-        (pct_tbl[numer_label] / pct_tbl[denom_label]) * 100.0,
-        0.0
-    ).round(1)
-    pct_tbl = pct_tbl.sort_values("%", ascending=False) if not show_all_ac else pct_tbl
-
-    st.dataframe(pct_tbl, use_container_width=True)
-    st.download_button(
-        "Download CSV — Conversion %",
-        data=pct_tbl.to_csv(index=False).encode("utf-8"),
-        file_name=f"ac_conversion_percent_{'all' if show_all_ac else 'by_ac'}_{mode.lower()}.csv",
-        mime="text/csv",
-        key="ac_dl_pct"
-    )
-
-    # Overall KPI from the table in view (works for both modes)
-    den_sum = int(pct_tbl[denom_label].sum())
-    num_sum = int(pct_tbl[numer_label].sum())
-    overall_pct = (num_sum / den_sum * 100.0) if den_sum > 0 else 0.0
-    st.markdown(
-        f"<div class='kpi-card'><div class='kpi-title'>Overall {numer_label} / {denom_label} ({mode})</div>"
-        f"<div class='kpi-value'>{overall_pct:.1f}%</div>"
-        f"<div class='kpi-sub'>Num: {num_sum:,} • Den: {den_sum:,}</div></div>",
-        unsafe_allow_html=True
-    )
-
-    # ---- Breakdown: AC × (Deal Source or Country) or Totals × (…)
-    st.markdown("### Breakdown")
-    grp_mode = st.radio("Group by", ["JetLearn Deal Source", "Country"], index=0, horizontal=True, key="ac_grp_mode")
-
-    have_grp = False
-    if grp_mode == "JetLearn Deal Source":
-        if not source_col or source_col not in d.columns:
-            st.info("Deal Source column not found.")
-        else:
-            d["_grp"] = d[source_col].fillna("Unknown").astype(str)
-            have_grp = True
-    else:
-        if not country_col or country_col not in d.columns:
-            st.info("Country column not found.")
-        else:
-            d["_grp"] = d[country_col].fillna("Unknown").astype(str)
-            have_grp = True
-
-    if have_grp:
-        sub2 = pd.DataFrame({
-            "Academic Counsellor": d["_ac"],
-            "_grp": d["_grp"],
-            "Create Date — Count": ind_create.astype(int),
-            "First Cal — Count": ind_first.astype(int),
-            "Cal Rescheduled — Count": ind_resch.astype(int),
-            "Cal Done — Count": ind_done.astype(int),
-            "Payment Received — Count": ind_paid.astype(int),
-            col_label_ref:           ind_ref_sales.astype(int),
-        })
-
-        if show_all_ac:
-            gb = (
-                sub2.drop(columns=["Academic Counsellor"])
-                    .groupby("_grp", as_index=False)
-                    .sum(numeric_only=True)
-                    .rename(columns={"_grp": grp_mode})
-                    .sort_values("Create Date — Count", ascending=False)
-            )
-        else:
-            gb = (
-                sub2.groupby(["Academic Counsellor","_grp"], as_index=False)
-                    .sum(numeric_only=True)
-                    .rename(columns={"_grp": grp_mode})
-                    .sort_values(["Academic Counsellor","Create Date — Count"], ascending=[True, False])
-            )
-
-        st.dataframe(gb, use_container_width=True)
-        st.download_button(
-            f"Download CSV — {'Totals × ' if show_all_ac else 'AC × '}{grp_mode} breakdown ({mode})",
-            data=gb.to_csv(index=False).encode("utf-8"),
-            file_name=f"{'totals' if show_all_ac else 'ac'}_breakdown_by_{'deal_source' if grp_mode.startswith('JetLearn') else 'country'}_{mode.lower()}.csv",
-            mime="text/csv",
-            key="ac_dl_breakdown"
+    chart = (
+        alt.Chart(g)
+        .mark_bar(opacity=0.9)
+        .encode(
+            x=alt.X("Academic Counsellor:N", sort=ac_order, title="Academic Counsellor"),
+            y=y_field,
+            color=alt.Color("Deal Source:N", title="Deal Source", legend=alt.Legend(orient="bottom", labelLimit=240)),
+            tooltip=tooltip_fields,
+            order=alt.Order("Deal Source:N")
         )
+        .add_params(sel)
+        .transform_filter(sel)
+        .properties(height=420, title="Payments stacked by Deal Source")
+    )
+
+    st.altair_chart(chart, use_container_width=True)
