@@ -3078,21 +3078,15 @@ elif view == "Lead Movement":
 elif view == "AC Wise Detail":
     st.subheader("AC Wise Detail – Create-date scoped counts & % conversions")
 
-    # ---- Column mappings (most are already available above)
-    referral_intent_col = find_col(
-        df,
-        [
-            "Referral Intent Source", "Referral intent source", "Referral Intent",
-            "Referral intent", "ReferralIntent", "Referral_Intention",
-            "Referral Intent (Source)"
-        ]
-    )
+    # ---- Column mappings
+    # We will look specifically for "Referral Intent Source".
+    referral_intent_col = find_col(df, ["Referral Intent Source", "Referral intent source"])
 
     if not create_col or not counsellor_col:
         st.error("Missing required columns (Create Date and Academic Counsellor).")
         st.stop()
 
-    # ---- Date scope (population defaulted by Create Date) + Counting mode
+    # ---- Date scope (population by Create Date) & Counting mode
     st.markdown("**Date scope (based on Create Date) & Counting mode**")
     c1, c2 = st.columns(2)
     scope_pick = st.radio(
@@ -3117,14 +3111,12 @@ elif view == "AC Wise Detail":
             st.error("End date cannot be before start date.")
             st.stop()
 
-    # Mode: MTD vs Cohort
     mode = st.radio("Counting mode", ["MTD", "Cohort"], index=0, horizontal=True, key="ac_mode")
     st.caption(f"Create-date scope: **{scope_start} → {scope_end}** • Mode: **{mode}**")
 
     # ---- Start from globally filtered df_f, then optional Deal Stage filter
     d = df_f.copy()
 
-    # Optional Deal Stage filter
     if dealstage_col and dealstage_col in d.columns:
         stage_vals = ["All"] + sorted(d[dealstage_col].dropna().astype(str).unique().tolist())
         sel_stages = st.multiselect(
@@ -3170,23 +3162,24 @@ elif view == "AC Wise Detail":
         ind_done   = m_done
         ind_paid   = m_paid
 
-    # Referral Intent – treat truthy strings as present; count against Create-date scope
-    def _is_ref_intent(x):
-        if pd.isna(x): return False
-        s = str(x).strip().lower()
-        return (s in {"yes","y","true","t","1"}) or ("referr" in s) or (s not in {"", "no", "n", "false", "0", "none", "nan"})
-    ref_intent_present = (
-        d[referral_intent_col].map(_is_ref_intent)
-        if referral_intent_col and referral_intent_col in d.columns
-        else pd.Series(False, index=d.index)
-    )
-    ind_ref_intent = pop_mask & ref_intent_present
+    # ---------- Referral Intent Source = "Sales Generated" only ----------
+    # Count only rows where Referral Intent Source exactly equals "Sales Generated" (case-insensitive, whitespace-safe).
+    if referral_intent_col and referral_intent_col in d.columns:
+        _ref = d[referral_intent_col].astype(str).str.strip().str.lower()
+        sales_generated_mask = (_ref == "sales generated")
+    else:
+        sales_generated_mask = pd.Series(False, index=d.index)
+
+    # Count it against Create-date population (same behavior as earlier request)
+    ind_ref_sales = pop_mask & sales_generated_mask
 
     # ---------- NEW: Aggregate toggle (All Academic Counsellors) ----------
     st.markdown("#### Display mode")
     show_all_ac = st.checkbox("Aggregate all Academic Counsellors (show totals only)", value=False, key="ac_all_toggle")
 
     # ---- Build AC-wise table (or aggregated)
+    col_label_ref = "Referral Intent Source = Sales Generated — Count"
+
     base_sub = pd.DataFrame({
         "Academic Counsellor": d["_ac"],
         "Create Date — Count": ind_create.astype(int),
@@ -3194,7 +3187,7 @@ elif view == "AC Wise Detail":
         "Cal Rescheduled — Count": ind_resch.astype(int),
         "Cal Done — Count": ind_done.astype(int),
         "Payment Received — Count": ind_paid.astype(int),
-        "Referral Intent (sales) — Count": ind_ref_intent.astype(int),
+        col_label_ref:           ind_ref_sales.astype(int),
     })
 
     if show_all_ac:
@@ -3229,13 +3222,13 @@ elif view == "AC Wise Detail":
         "Cal Rescheduled — Count",
         "Cal Done — Count",
         "Payment Received — Count",
-        "Referral Intent (sales) — Count",
+        col_label_ref,
     ]
     c3, c4 = st.columns(2)
     with c3:
         denom_label = st.selectbox("Denominator", metric_labels, index=0, key="ac_pct_denom")
     with c4:
-        numer_label = st.selectbox("Numerator", metric_labels, index=3, key="ac_pct_numer")
+        numer_label = st.selectbox("Numerator",  metric_labels, index=3, key="ac_pct_numer")
 
     pct_tbl = agg[["Academic Counsellor", denom_label, numer_label]].copy()
     pct_tbl["%"] = np.where(
@@ -3292,7 +3285,7 @@ elif view == "AC Wise Detail":
             "Cal Rescheduled — Count": ind_resch.astype(int),
             "Cal Done — Count": ind_done.astype(int),
             "Payment Received — Count": ind_paid.astype(int),
-            "Referral Intent (sales) — Count": ind_ref_intent.astype(int),
+            col_label_ref:           ind_ref_sales.astype(int),
         })
 
         if show_all_ac:
